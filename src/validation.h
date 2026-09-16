@@ -357,6 +357,15 @@ static_assert(std::is_nothrow_destructible_v<CScriptCheck>);
 
 /** Functions for validating blocks and updating the block tree */
 
+/** Check the mandatory checkpoint against a candidate header and its parent chain. */
+bool CheckHistoricalCheckpoint(const CBlockHeader& block, const CBlockIndex* prev, const Consensus::Params& params, BlockValidationState& state);
+/** True only for ancestors or descendants of the exact configured checkpoint. */
+bool IsCheckpointAnchored(const CBlockIndex& index, const CBlockIndex* checkpoint, const Consensus::Params& params);
+
+/** Height-dependent strict DER and low-S rules for block signatures. */
+bool CheckBlockSignatureEncoding(const CBlock& block, int height);
+bool CheckBlockRewardDestination(const CBlock& block, int height);
+
 /** Context-independent validity checks */
 bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true, bool fCheckMerkleRoot = true, bool fCheckSig = true);
 
@@ -1062,6 +1071,10 @@ public:
 
     //! Returns nullptr if no snapshot has been loaded.
     const CBlockIndex* GetSnapshotBaseBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Historical headers may be staged before the checkpoint, but cannot change the UTXO set.
+    bool CanActivateCheckpointChain(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsTrustedHistory(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! The most-work chain.
     Chainstate& ActiveChainstate() const;

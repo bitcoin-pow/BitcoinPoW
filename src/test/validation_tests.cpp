@@ -4,6 +4,10 @@
 
 #include <chainparams.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
+#include <key.h>
+#include <util/strencodings.h>
+#include <util/signalinterrupt.h>
 #include <consensus/merkle.h>
 #include <core_io.h>
 #include <hash.h>
@@ -13,13 +17,374 @@
 #include <util/chaintype.h>
 #include <validation.h>
 
+#include <array>
 #include <string>
 
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <iterator>
+#include <set>
 
 BOOST_FIXTURE_TEST_SUITE(validation_tests, TestingSetup)
+
+BOOST_AUTO_TEST_CASE(historical_checkpoint_anchor)
+{
+    // A small synthetic header chain exercises the same ancestry logic as
+    // mainnet, including the checkpoint height itself and its descendants.
+    std::array<CBlockHeader, 5> headers;
+    std::array<uint256, 5> hashes;
+    std::array<CBlockIndex, 5> indices;
+    for (size_t i = 0; i < headers.size(); ++i) {
+        headers[i].nNonce = i;
+        if (i) headers[i].hashPrevBlock = hashes[i - 1];
+        hashes[i] = headers[i].GetHash();
+        indices[i].phashBlock = &hashes[i];
+        indices[i].nHeight = i;
+        indices[i].pprev = i ? &indices[i - 1] : nullptr;
+        indices[i].BuildSkip();
+    }
+    Consensus::Params params{};
+    params.historical_checkpoint = Consensus::HistoricalCheckpoint{3, hashes[3]};
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BlockValidationState state;
+        BOOST_CHECK(CheckHistoricalCheckpoint(headers[i], indices[i].pprev, params, state));
+        BOOST_CHECK(!IsCheckpointAnchored(indices[i], nullptr, params));
+        BOOST_CHECK(IsCheckpointAnchored(indices[i], &indices[3], params));
+    }
+
+    CBlockHeader wrong_header = headers[3];
+    ++wrong_header.nNonce;
+    BlockValidationState wrong_state;
+    BOOST_CHECK(!CheckHistoricalCheckpoint(wrong_header, &indices[2], params, wrong_state));
+    BOOST_CHECK(wrong_state.GetResult() == BlockValidationResult::BLOCK_CHECKPOINT);
+    const uint256 wrong_hash = wrong_header.GetHash();
+    CBlockIndex wrong_index;
+    wrong_index.nHeight = 3;
+    wrong_index.pprev = &indices[2];
+    wrong_index.phashBlock = &wrong_hash;
+    BOOST_CHECK(!IsCheckpointAnchored(indices[2], &wrong_index, params));
+    BOOST_CHECK(!IsCheckpointAnchored(wrong_index, &indices[3], params));
+    BlockValidationState descendant_state;
+    BOOST_CHECK(!CheckHistoricalCheckpoint(headers[4], &wrong_index, params, descendant_state));
+
+    // Height alone is insufficient, including for blocks below the checkpoint.
+    CBlockIndex side_branch;
+    side_branch.nHeight = 2;
+    side_branch.pprev = &indices[1];
+    side_branch.phashBlock = &wrong_hash;
+    BOOST_CHECK(!IsCheckpointAnchored(side_branch, &indices[3], params));
+    wrong_index.pprev = &side_branch;
+    wrong_index.nHeight = 3;
+    wrong_index.phashBlock = &wrong_hash;
+    wrong_index.pskip = nullptr;
+    BOOST_CHECK(!IsCheckpointAnchored(wrong_index, &indices[3], params));
+
+    indices[3].nStatus |= BLOCK_FAILED_VALID;
+    BOOST_CHECK(!IsCheckpointAnchored(indices[2], &indices[3], params));
+    params.historical_checkpoint.reset();
+    BOOST_CHECK(IsCheckpointAnchored(indices[2], nullptr, params));
+}
+
+BOOST_AUTO_TEST_CASE(historical_checkpoint_staging)
+{
+    const auto base_params = CreateChainParams(*m_node.args, ChainType::REGTEST);
+    CBlock first = base_params->GenesisBlock();
+    first.hashPrevBlock = first.GetHash();
+    first.nVersion = 4;
+    first.nBits = UintToArith256(base_params->GetConsensus().powLimit).GetCompact();
+    ++first.nTime;
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].scriptSig = CScript() << 1 << OP_0;
+    coinbase.vout.emplace_back(1, CScript() << OP_TRUE);
+    first.vtx = {MakeTransactionRef(coinbase)};
+    first.hashMerkleRoot = BlockMerkleRoot(first);
+    while (!CheckProofOfWork(first.GetHash(), first.nBits, base_params->GetConsensus())) ++first.nNonce;
+    CBlockHeader checkpoint = first;
+    checkpoint.hashPrevBlock = first.GetHash();
+    ++checkpoint.nTime;
+    struct CheckpointParams : CChainParams {
+        CheckpointParams(const CChainParams& base, const uint256& hash) : CChainParams(base)
+        {
+            consensus.historical_checkpoint = Consensus::HistoricalCheckpoint{2, hash};
+            consensus.nLastPOWBlock = 10;
+        }
+    } params(*base_params, checkpoint.GetHash());
+    util::SignalInterrupt interrupt;
+    auto& notifications = m_node.chainman->GetNotifications();
+    ChainstateManager manager(interrupt,
+        {.chainparams = params, .datadir = m_path_root / "checkpoint-test",
+         .adjusted_time_callback = [] { return NodeClock::now(); },
+         .checkpoints_enabled = false, .notifications = notifications},
+        {.chainparams = params, .blocks_dir = m_path_root / "checkpoint-test" / "blocks",
+         .notifications = notifications});
+    LOCK(cs_main);
+    CBlockIndex* best = nullptr;
+    auto* genesis = manager.m_blockman.AddToBlockIndex(params.GenesisBlock(), best);
+    auto* staged = manager.m_blockman.AddToBlockIndex(first, best);
+    BOOST_CHECK(manager.CanActivateCheckpointChain(*genesis));
+    BOOST_CHECK(!manager.CanActivateCheckpointChain(*staged));
+    BOOST_CHECK(!manager.IsTrustedHistory(*staged));
+
+    auto& chainstate = manager.InitializeChainstate(nullptr);
+    chainstate.m_chain.SetTip(*genesis);
+    CCoinsView backing;
+    CCoinsViewCache view(&backing);
+    view.SetBestBlock(genesis->GetBlockHash());
+    const COutPoint created(first.vtx[0]->GetHash(), 0);
+    BlockValidationState unanchored;
+    BOOST_CHECK(!chainstate.ConnectBlock(first, unanchored, staged, view, true));
+    BOOST_CHECK_EQUAL(unanchored.GetRejectReason(), "unanchored-history");
+    BOOST_CHECK(!view.HaveCoin(created));
+
+    // This models headers-first sync and sequential -reindex imports. Once
+    // the anchor header arrives, already-staged ancestors become eligible.
+    auto* anchor = manager.m_blockman.AddToBlockIndex(checkpoint, best);
+    BOOST_CHECK(manager.CanActivateCheckpointChain(*staged));
+    BOOST_CHECK(manager.IsTrustedHistory(*staged));
+    BOOST_CHECK(manager.IsTrustedHistory(*anchor));
+    BlockValidationState connected;
+    BOOST_REQUIRE_MESSAGE(chainstate.ConnectBlock(first, connected, staged, view, true), connected.ToString());
+    BOOST_CHECK(view.HaveCoin(created));
+    BOOST_CHECK_EQUAL(view.AccessCoin(created).out.nValue, 1);
+    CBlockHeader next = checkpoint;
+    next.hashPrevBlock = checkpoint.GetHash();
+    ++next.nTime;
+    auto* descendant = manager.m_blockman.AddToBlockIndex(next, best);
+    BOOST_CHECK(manager.CanActivateCheckpointChain(*descendant));
+    BOOST_CHECK(!manager.IsTrustedHistory(*descendant));
+
+    CBlockHeader other = first;
+    ++other.nNonce;
+    auto* side = manager.m_blockman.AddToBlockIndex(other, best);
+    BOOST_CHECK(!manager.CanActivateCheckpointChain(*side));
+    BOOST_CHECK(!manager.IsTrustedHistory(*side));
+}
+
+BOOST_AUTO_TEST_CASE(mainnet_historical_checkpoint)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
+    const auto& anchor = params->GetConsensus().historical_checkpoint;
+    BOOST_REQUIRE(anchor);
+    BOOST_CHECK_EQUAL(anchor->height, 141410);
+    BOOST_CHECK_EQUAL(anchor->hash.GetHex(), "05d553c0600bdeff22592f1331c8bc9fd534c35cd75a892c32055dea914cd00e");
+    BOOST_CHECK(params->Checkpoints().mapCheckpoints.at(anchor->height) == anchor->hash);
+}
+
+BOOST_AUTO_TEST_CASE(skipped_block_signature_is_not_cached)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
+    CBlock block = params->GenesisBlock();
+    block.fChecked = false;
+    // PoW header hashes do not include the block signature. All other checks
+    // still pass, but a subsequent full check must reject a nonempty signature.
+    block.vchBlockSig = {1};
+    BlockValidationState staged_state;
+    BOOST_REQUIRE(CheckBlock(block, staged_state, params->GetConsensus(), true, true, false));
+    BOOST_CHECK(!block.fChecked);
+    BlockValidationState full_state;
+    BOOST_CHECK(!CheckBlock(block, full_state, params->GetConsensus()));
+    BOOST_CHECK_EQUAL(full_state.GetRejectReason(), "bad-blk-signature");
+}
+
+// Audit reproducer, not a desired security property: fixed ECDSA signing
+// nonces remain valid under the fork rules. Never use these public test secrets.
+BOOST_AUTO_TEST_CASE(mining_fixed_signing_nonce_audit)
+{
+    using boost::multiprecision::cpp_int;
+    const cpp_int order("0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141");
+    const cpp_int r("0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const auto pubbytes = ParseHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+    const CPubKey pubkey(pubbytes);
+    CBlock block;
+    block.nNonce = CURRENT_MINING_NONCE;
+    block.nTime = 1700000000;
+    const arith_uint256 base = UintToArith256(block.GetHashWithoutSign());
+    const auto der_integer = [](const cpp_int& value) {
+        std::vector<unsigned char> bytes;
+        export_bits(value, std::back_inserter(bytes), 8, true);
+        if (bytes.front() & 0x80) bytes.insert(bytes.begin(), 0);
+        std::vector<unsigned char> encoded{0x02, static_cast<unsigned char>(bytes.size())};
+        encoded.insert(encoded.end(), bytes.begin(), bytes.end());
+        return encoded;
+    };
+    const auto encoded_r = der_integer(r);
+    unsigned accepted = 0;
+    std::set<uint256> proof_hashes;
+    for (uint64_t nonce = 0; nonce < 256; ++nonce) {
+        const uint256 message = ArithToUint256(base + arith_uint256(nonce));
+        // The verifier interprets the raw message bytes as a big-endian scalar.
+        const cpp_int z("0x" + HexStr(message));
+        // ECDSA s = k^-1 * (z + r*d) mod n. Here d=k=1, so no
+        // signing call, EC multiplication, or inversion is needed per trial.
+        cpp_int scalar_s = (z + r) % order;
+        if (scalar_s == 0) continue;
+        if (scalar_s > order / 2) scalar_s = order - scalar_s;
+        const auto encoded_s = der_integer(scalar_s);
+        std::vector<unsigned char> der{0x30, static_cast<unsigned char>(encoded_r.size() + encoded_s.size())};
+        der.insert(der.end(), encoded_r.begin(), encoded_r.end());
+        der.insert(der.end(), encoded_s.begin(), encoded_s.end());
+        BOOST_REQUIRE(pubkey.Verify(message, der));
+        block.vchBlockSig = der;
+        for (int shift = 56; shift >= 0; shift -= 8) block.vchBlockSig.push_back(nonce >> shift);
+        if (!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT)) continue;
+        ++accepted;
+        if (der.size() == 70) {
+            // Trailing garbage must fail DER even when total length stays 79.
+            block.vchBlockSig.insert(block.vchBlockSig.begin() + der.size(), 0);
+            BOOST_CHECK_EQUAL(block.vchBlockSig.size(), 79U);
+            BOOST_CHECK(!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+        }
+        CDataStream stream(SER_GETHASH, 0);
+        stream << nonce << der;
+        proof_hashes.insert(Hash(stream));
+        // The accepted signature also recovers the committed public key.
+        bool recovered_match = false;
+        for (int recid = 0; recid < 4; ++recid) {
+            CPubKey recovered;
+            if (recovered.RecoverLaxDER(message, der, recid, true) && recovered == pubkey) recovered_match = true;
+        }
+        BOOST_CHECK(recovered_match);
+        // Literal signature reuse with a changed external mining nonce fails.
+        BOOST_CHECK(!pubkey.Verify(ArithToUint256(base + arith_uint256(nonce + 1)), der));
+    }
+    BOOST_TEST_MESSAGE("Fixed-signing-nonce candidates accepted: " << accepted << "/256");
+    BOOST_CHECK_GT(accepted, 240U);
+    BOOST_CHECK_EQUAL(proof_hashes.size(), accepted);
+}
+
+BOOST_AUTO_TEST_CASE(block_signature_size_activation)
+{
+    // Structurally valid low-S DER values; actual cryptographic verification is
+    // separate. Exercise both allowed lengths and their adjacent boundaries.
+    for (size_t r_size : {size_t{31}, size_t{32}, size_t{33}}) {
+        for (size_t s_size : {size_t{31}, size_t{32}}) {
+            std::vector<unsigned char> der{0x30, static_cast<unsigned char>(4 + r_size + s_size),
+                                          0x02, static_cast<unsigned char>(r_size)};
+            std::vector<unsigned char> r(r_size, 1);
+            if (r_size == 33) { r[0] = 0; r[1] = 0x80; }
+            der.insert(der.end(), r.begin(), r.end());
+            der.push_back(0x02);
+            der.push_back(s_size);
+            der.insert(der.end(), s_size, 1);
+            CBlock block;
+            block.nNonce = CURRENT_MINING_NONCE;
+            block.vchBlockSig = der;
+            block.vchBlockSig.resize(der.size() + 8, 0);
+            BOOST_CHECK(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT - 1));
+            const bool allowed = block.vchBlockSig.size() == 78 || block.vchBlockSig.size() == 79;
+            BOOST_CHECK_EQUAL(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT), allowed);
+            BOOST_CHECK_EQUAL(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT + 1), allowed);
+            block.vchBlockSig.resize(80, 0);
+            BOOST_CHECK(!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(miner_reward_destination_activation)
+{
+    CKey miner;
+    miner.MakeNewKey(true);
+    CKey other;
+    other.MakeNewKey(true);
+    const CScript miner_script = CScript() << miner.GetPubKey().getvch() << OP_CHECKSIG;
+    const CScript other_script = CScript() << other.GetPubKey().getvch() << OP_CHECKSIG;
+
+    CMutableTransaction coinstake;
+    coinstake.vout.emplace_back(0, CScript());
+    coinstake.vout.emplace_back(100, miner_script);
+    CBlock block;
+    block.nNonce = CURRENT_MINING_NONCE;
+    auto update = [&] { block.vtx = {MakeTransactionRef(coinstake), MakeTransactionRef(coinstake)}; };
+    BOOST_CHECK(!CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+    update();
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT - 1));
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+
+    coinstake.vout.emplace_back(1, other_script);
+    update();
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT - 1));
+    BOOST_CHECK(!CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+    BOOST_CHECK(!CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT + 1));
+
+    coinstake.vout.back().scriptPubKey = miner_script;
+    update();
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+    coinstake.vout.back().nValue = 0;
+    coinstake.vout.back().scriptPubKey = other_script;
+    update();
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+
+    coinstake.vout[1].scriptPubKey = CScript() << OP_TRUE;
+    update();
+    BOOST_CHECK(!CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+    coinstake.vout[1].scriptPubKey = miner_script;
+    coinstake.vout[1].nValue = 0;
+    update();
+    BOOST_CHECK(!CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+
+    block.nNonce = 0;
+    BOOST_CHECK(CheckBlockRewardDestination(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+}
+
+BOOST_AUTO_TEST_CASE(block_signature_encoding_activation)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    const uint256 hash = uint256S("01");
+    std::vector<unsigned char> signature;
+    do {
+        key.MakeNewKey(true);
+        BOOST_REQUIRE(key.SignMining(hash, signature));
+    } while (signature.size() < 70);
+
+    for (uint32_t marker : {CURRENT_MINING_NONCE}) {
+        CBlock block;
+        block.nNonce = marker;
+        auto set_signature = [&](const std::vector<unsigned char>& der) {
+            block.vchBlockSig = der;
+            if (marker != 0xFEEDBEEF) block.vchBlockSig.resize(der.size() + 8, 0);
+        };
+        set_signature(signature);
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, 144443));
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, 144444));
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, 144445));
+
+        auto padded = signature;
+        padded.insert(padded.end(), {0xde, 0xad, 0xbe, 0xef});
+        // Reproduce the vulnerability: lax verification accepts appended bytes.
+        BOOST_REQUIRE(key.GetPubKey().Verify(hash, padded));
+        set_signature(padded);
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, 144443));
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144444));
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144445));
+
+        // Allowed total length and strict DER, but S=curve_order-1 is high-S.
+        set_signature(ParseHex("304502200101010101010101010101010101010101010101010101010101010101010101022100fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140"));
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, 144443));
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144444));
+
+        set_signature({});
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144444));
+        block.vchBlockSig.assign(7, 0);
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144444));
+
+        // A prior context-free validation cache must not skip the new rule.
+        block.fChecked = true;
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, 144444));
+    }
+    for (uint32_t marker : {0xFEEDBEEFU, 0xFEEDBEE1U}) {
+        CBlock retired;
+        retired.nNonce = marker;
+        retired.vchBlockSig = signature;
+        if (marker == 0xFEEDBEE1U) retired.vchBlockSig.resize(signature.size() + 8, 0);
+        BOOST_CHECK(!CheckBlockSignatureEncoding(retired, 144444));
+    }
+    CBlock pow_block;
+    BOOST_CHECK(CheckBlockSignatureEncoding(pow_block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+}
 
 static void TestBlockSubsidyHalvings(const Consensus::Params& consensusParams)
 {

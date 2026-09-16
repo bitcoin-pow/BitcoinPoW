@@ -11,6 +11,7 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace Consensus {
@@ -71,7 +72,15 @@ struct BIP9Deployment {
 /**
  * Parameters that influence chain consensus.
  */
+/** Trusted header anchor for replaying history without retired mining proofs. */
+struct HistoricalCheckpoint {
+    int height;
+    uint256 hash;
+};
+
 struct Params {
+    std::optional<HistoricalCheckpoint> historical_checkpoint;
+
     uint256 hashGenesisBlock;
     int nSubsidyHalvingInterval;
     /**

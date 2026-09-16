@@ -19,6 +19,8 @@
 #include <consensus/consensus.h>
 #include <logging.h>
 
+#include <algorithm>
+
 using namespace std;
 
 // Stake Modifier (hash modifier of proof-of-stake):
@@ -36,39 +38,23 @@ uint256 ComputeStakeModifier(const CBlockIndex* pindexPrev, const uint256& kerne
     return Hash(ss);
 }
 
-// kernel protocol
-// coinstake must meet hash target according to the protocol:
-// kernel (input 0) must meet the formula
-//     hash(nStakeModifier + blockFrom.nTime + txPrev.vout.hash + txPrev.vout.n + nTime) < bnTarget;
-// this ensures that the chance of getting a coinstake is proportional to the
-// amount of coins one owns.
-// The reason this hash is chosen is the following:
-//   nStakeModifier: scrambles computation to make it very difficult to precompute
-//                   future proof-of-stake
-//   blockFrom.nTime: slightly scrambles computation
-//   txPrev.vout.hash: hash of txPrev, to reduce the chance of nodes
-//                     generating coinstake at the same time
-//   txPrev.vout.n: output number of txPrev, to reduce the chance of nodes
-//                  generating coinstake at the same time
-//   nTime: current timestamp
-//   block/tx hash should not be used here as they can be generated in vast
-//
+// Current PurePoW kernel: every eligible UTXO meets the kernel target.
+// Mining work is enforced by the nonce-bearing block signature. Keep computing
+// the current proof hash for the block index, without the retired search loops.
 bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t blockFromTime, CAmount prevoutValue, const COutPoint& prevout, unsigned int nTimeBlock, uint32_t nNonce, uint256& hashProofOfStake, uint256& targetProofOfStake, bool fPrintProofOfStake)
 {
     if (nTimeBlock < blockFromTime)  // Transaction timestamp violation
         return error("CheckStakeKernelHash() : nTime violation");
 
-    if ( !((nNonce == 0xFEEDBEEF) || (nNonce == 0xFEEDBEE1) || (nNonce == 0xFEEDBEE2)) )  // Proof of Transaction Work indicator
-        return error("CheckStakeKernelHash() : nNonce violation");        
+    if (nNonce != CURRENT_MINING_NONCE)
+        return error("CheckStakeKernelHash() : retired mining marker");
 
     // Base target with 0 PoS contribution
     arith_uint256 bnTarget;
     bnTarget.SetCompact(nBits);
 
     targetProofOfStake = ArithToUint256(bnTarget);
-    bnTarget = POW_POT_DIFF_HELPER*bnTarget;
 
-    // Legacy mining
     uint256 nStakeModifier = pindexPrev->nStakeModifier;
 
     // Calculate hash
@@ -80,85 +66,30 @@ bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t 
     // Now check if hash meets target protocol
     arith_uint256 actual = UintToArith256(hashProofOfStake);
 
-    int loop_cnt = 64;
-    if ( ((pindexPrev->nHeight + 1) < BITCOIN_ELIMINATE_MINING_POOLS_START_HEIGHT) && ( nNonce == 0xFEEDBEEF ) ) // Hard fork v0
-    {
-        loop_cnt = 256;
-    }
-    else if ( ((pindexPrev->nHeight + 1) > BITCOIN_ELIMINATE_MINING_POOLS_PURE_POW_START_HEIGHT) ) // Hard fork v2
-    {
-        // Hardfork to eliminate mining pools using PurePoW (minimal utxos)
-        bnTarget.SetCompact(nBits);
-        targetProofOfStake = ArithToUint256(bnTarget);
-        // All utxos will meet target solution
-        static const arith_uint256 targ_max("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF");
-        bnTarget = targ_max;
-        loop_cnt = 1;
-    }    
-    else // Hard fork v1
-    {
-        // Hardfork to eliminate mining pools
-        bnTarget.SetCompact(nBits);
-        targetProofOfStake = ArithToUint256(bnTarget);
-        bnTarget = POW_POT_DIFF_HELPER*bnTarget;
-        bnTarget *= 100;
-    }
+    const int h = ChainActive().Height();
+    const uint64_t data = actual.GetLow64();
+    const uint16_t a = (20000 + (data >> 0)) & 0xFF;
+    const uint16_t b = (18000 + (data >> 8)) & 0xFF;
+    const uint16_t c = (16000 + (data >> 16)) & 0xFF;
+    const uint16_t d = (14000 + (data >> 24)) & 0xFF;
+    const uint16_t e = (12000 + (data >> 32)) & 0xFF;
+    const uint16_t f = (10000 + (data >> 40)) & 0xFF;
+    const uint16_t g = (8000 + (data >> 48)) & 0xFF;
+    const auto& chain = gp_chainman->m_active_chainstate->m_chain;
+    if (h < std::max({a, b, c, d, e, f, g})) return false;
 
-    if ( (pindexPrev->nHeight + 1) < BITCOIN_POW256_START_HEIGHT )
-    {
-        if (actual <= bnTarget)
-            return true;
-    }
-    else
-    {
-        // BitcoinPoW - HARDFORK - Block 23,333 and beyond - add more CPU logic work and sha256 work
-        // NOTE: Validation needs to see a solution somewhere in the 256 window. It doesn't matter which of the 256
-        //       attempts has the valid solution.
-        int h = ChainActive().Height();
-        uint64_t data = 0;
-        uint16_t a = 0;
-        uint16_t b = 0;
-        uint16_t c = 0;
-        uint16_t d = 0;
-        uint16_t e = 0;
-        uint16_t f = 0;
-        uint16_t g = 0;
-        auto& chain_active = gp_chainman->m_active_chainstate->m_chain;
-        for ( volatile int k=1; k<=loop_cnt; k++ )
-        {
-            // Grab values from random previous headers
-            data = actual.GetLow64();
-            a = (20000 + (data>>0))&0xFF;
-            b = (18000 + (data>>8))&0xFF;
-            c = (16000 + (data>>16))&0xFF;
-            d = (14000 + (data>>24))&0xFF;
-            e = (12000 + (data>>32))&0xFF;
-            f = (10000 + (data>>40))&0xFF;
-            g = ( 8000 + (data>>48))&0xFF;
+    CDataStream proof(SER_GETHASH, 0);
+    proof << chain[h-a]->GetBlockHeader_hashMerkleRoot()
+          << chain[h-b]->GetBlockHeader_hashPrevBlock()
+          << chain[h-c]->GetBlockHeader_nBits()
+          << chain[h-d]->GetBlockHeader_nTime()
+          << chain[h-e]->GetBlockHeader_prevoutStakehash()
+          << chain[h-f]->GetBlockHeader_prevoutStaken()
+          << chain[h-g]->GetBlockHeader_vchBlockSig();
+    hashProofOfStake = Hash(proof);
+    // The current kernel target is uint256's maximum, so every hash qualifies.
+    return true;
 
-            CDataStream ss(SER_GETHASH, 0);
-
-            ss << chain_active[h-a]->GetBlockHeader_hashMerkleRoot() << 
-                chain_active[h-b]->GetBlockHeader_hashPrevBlock() << 
-                chain_active[h-c]->GetBlockHeader_nBits() << 
-                chain_active[h-d]->GetBlockHeader_nTime() <<
-                chain_active[h-e]->GetBlockHeader_prevoutStakehash() << 
-                chain_active[h-f]->GetBlockHeader_prevoutStaken() << 
-                chain_active[h-g]->GetBlockHeader_vchBlockSig();
-
-            hashProofOfStake = Hash(ss);
-
-            actual = UintToArith256(hashProofOfStake);
- 
-            if (actual <= bnTarget)
-            {
-                std::cout << "actual: " << actual.ToString() << std::endl;
-                return true;
-            }     
-        }
-    }
-
-    return false;
 }
 
 // Check kernel hash target and coinstake signature

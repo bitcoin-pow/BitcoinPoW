@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 
+class arith_uint256;
 class CBlockHeader;
 class CBlockIndex;
 class uint256;
@@ -17,6 +18,11 @@ class uint256;
 const CBlockIndex* GetLastBlockIndex(const CBlockIndex* pindex, bool fProofOfStake);
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&);
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
+
+/** Integer ASERT target calculation, with truncation and saturation defined by the ASERT specification. */
+arith_uint256 CalculateASERTTarget(const arith_uint256& reference_target, int64_t target_spacing,
+                                  int64_t time_diff, int64_t height_diff,
+                                  const arith_uint256& pow_limit, int64_t half_life);
 
 /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&);
@@ -26,12 +32,10 @@ bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params&
  * given height is not possible, given the proof-of-work on the prior block as
  * specified by old_nbits.
  *
- * This function only checks that the new value is within a factor of 4 of the
- * old value for blocks at the difficulty adjustment interval, and otherwise
- * requires the values to be the same.
- *
- * Always returns true on networks where min difficulty blocks are allowed,
- * such as regtest/testnet.
+ * Before the upgrade, retain the historical permissive presync behavior.
+ * After the upgrade, reject invalid targets. ASERT's exact target needs the
+ * anchor and timestamps, so full contextual header validation checks it.
+ * No-retargeting networks require the previous bits to be retained.
  */
 bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits);
 

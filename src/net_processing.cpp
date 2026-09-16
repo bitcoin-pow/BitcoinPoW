@@ -1367,6 +1367,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         return;
     }
 
+    if (!m_chainman.CanActivateCheckpointChain(*state->pindexBestKnownBlock)) return;
+
     if (state->pindexLastCommonBlock == nullptr) {
         // Bootstrap quickly by guessing a parent of our best tip is the forking point.
         // Guessing wrong in either direction is not a problem.

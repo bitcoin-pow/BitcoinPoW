@@ -1,48 +1,35 @@
-Bitcoin PoW (BTCW) - White paper (10,000 ft view)
-=====================================
+# Bitcoin PoW (BTCW)
 
-https://www.bitcoin-pow.org
+Bitcoin PoW is a cryptocurrency with its own chain and wallet. BTCW blocks after the early proof-of-work period use a coin owned by the miner and a signature-based work search. The miner creates a coinstake transaction using an eligible unspent transaction output (UTXO), then searches for a block signature and 64-bit nonce whose hash meets the network target.
 
-https://www.twitter.com/bitcoin_pow
+BTCW aims to make mining practical for people running their own wallets and to make conventional pool arrangements harder. Its rules tie mining to a coin owner, but they do **not** guarantee that pools cannot exist or that every mining attempt has the same computational cost.
 
-https://t.me/BitcoinPoWPoT
+## How mining works
 
+1. **Choose an eligible coin.** The wallet selects a mature UTXO it can spend and creates a coinstake transaction. The current kernel check does not give larger UTXOs more mining weight; owning more eligible UTXOs can provide more choices of mining input.
+2. **Search for work.** The miner signs a message derived from the unsigned block header and an external 64-bit nonce. It hashes the nonce and signature and repeats until that hash is at or below the target set by the block difficulty.
+3. **Verify the block.** Nodes check the coinstake spend, the relationship between the stake coin and the mining key, the block signature, the work target, and the block's other consensus rules.
 
-BitcoinPoW is Bitcoin using Proof of Work(PoW) / Proof of Stake(Pos) / Proof of Transactions (PoT)
-----------------
-```
-Satoshi's original Bitcoin has become very mining centralized. BitcoinPow enables a highly mining distributed 
-system where every wallet is forced to solo mine by using a two part approach as follows:
+The early chain used ordinary proof of work. Current mining combines UTXO ownership with a signature-based proof-of-work search. “Proof of Transactions” appears in older descriptions of BTCW, but there is no separate transaction-count mining stage in the current rules.
 
-1) Mining using utxos. Find a txid that solves the hashing function. The coinstake is created and the signature
-   used in the coinstake will be checked against that in part 2. Keep utxos amount as small as possible, larger
-   utxos amounts do not offer any benefit compared with small amounts, ex: use 0.00001 BTCW to send.
+## Rules from block 144444
 
-2) Mine using a new 64 bit nonce and combine with the block signature to create some mud. Throw the mud thru
-   a sha256 hash function and check if the hash meets a new threshold. Repeat as PoW.
+The rules activated at height **144444** require canonical, low-S block signatures and switch difficulty adjustment to ASERT. They also require every positive coinstake output to pay the same public key used for block signing. This includes the returned stake and the claimed block reward; a miner cannot put a positive coinstake payout directly into another key's output.
 
+These are consensus rules: nodes reject blocks that break them. They do not control payments a miner makes later, nor do they prove that a miner cannot arrange to share work with others. Reusing private ECDSA signing state can also reduce the work needed for repeated mining trials. See the [signature reuse audit](doc/signature-reuse-audit.md) for the details and limits of that finding.
 
-The validator will check to make sure that the signature in (1) matches the signature in (2) that was used
-to sign the work and that both parts meet the thresholds for acceptance. Since the signatures must match,
-the private key must be shared between (1) and (2). Sharing private keys will eliminate mining pools because all
-trust is now lost.
+## Getting started
 
-The other attempt at pool formation will be to have the users only perform (1) and then send back to the pool for the
-pool to finish doing (2). This will fail because the amount of work to do (1) is about 1% of the total work and the
-remaining 99% of the work is in (2). This means that users would send work back to the pool and sit idle for 99% of 
-the block time on average waiting for new work. Users have no benefit of using a pool and the pool will not form,
-it they do form, they will be very unhealty pools that do not offer benefit to the users nor the pool owner.
-```
+- Download a release from the [Bitcoin PoW releases page](https://btcw.space/download), or [build from source](doc/build-unix.md). Build notes for [Windows](doc/build-windows.md), [macOS](doc/build-osx.md), and other systems are in [`doc/`](doc/).
+- Run a BTCW wallet and let it synchronize with mainnet. Keep a secure backup of your wallet and keys.
+- Mining requires an eligible, mature UTXO in a wallet that can sign for it. The wallet creates the coinstake and searches for a valid block. Splitting coins into many outputs is optional; more outputs also create more UTXOs to manage and spend.
 
-How to mine
--------
-```
-Goals of mining are simple. Create as many transactions for your mining needs. You can also create more transaction as a reserve for the future.
-Use the 'tx' command on the console to create transactions (type 'help tx').
-```
+Mainnet is the supported public network in this codebase. Regtest is available for development. See [historical replay and activation notes](doc/checkpoint-history.md) for checkpoint, sync, and difficulty details.
 
-Notable Algorithm sources
--------
-https://github.com/bitcoin-pow/BitcoinPoW/blob/26.x_btcw/src/pos.cpp
+## Project resources
 
-https://github.com/bitcoin-pow/BitcoinPoW/blob/26.x_btcw/src/validation.cpp
+- [Source code](https://github.com/btcw-space/BitcoinPoW)
+- [Release notes](doc/release-notes.md)
+- [Issue tracker](https://github.com/btcw-space/BitcoinPoW/BitcoinPoW/issues)
+- [Project website](https://btcw.space)
+- [Telegram](https://t.me/BitcoinPoWPoT)

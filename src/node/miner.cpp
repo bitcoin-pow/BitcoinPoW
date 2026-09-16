@@ -802,21 +802,8 @@ void ThreadStakeMiner(wallet::CWallet& wallet, CConnman& connman, ChainstateMana
             wallet.m_last_coin_stake_search_interval = i - wallet.m_last_coin_stake_search_time + 1;
 
             // 
-            uint32_t nNonce{0xFEEDBEEF};
-            bool stop_mining_pools = false;
-
-            if ( (chainman.ActiveChain().Tip()->nHeight+1) >= BITCOIN_ELIMINATE_MINING_POOLS_PURE_POW_START_HEIGHT )
-            {
-                nNonce = 0xFEEDBEE2;// v2 fork nonce
-                stop_mining_pools = true;
-                LogPrintf("ThreadStakeMiner(): STAGE1 BEGIN PurePoW Fork=========\n");
-            }
-            else if ( (chainman.ActiveChain().Tip()->nHeight+1) >= BITCOIN_ELIMINATE_MINING_POOLS_START_HEIGHT )
-            {
-                nNonce = 0xFEEDBEE1;// v1 fork nonce
-                stop_mining_pools = true;
-                LogPrintf("ThreadStakeMiner(): STAGE1 BEGIN=========\n");
-            }
+            const uint32_t nNonce{CURRENT_MINING_NONCE};
+            LogPrintf("ThreadStakeMiner(): STAGE1 BEGIN PurePoW\n");
 
             // Try to sign a block (this also checks for a PoS stake)
             pblocktemplate->block.nTime = i;
@@ -854,7 +841,7 @@ void ThreadStakeMiner(wallet::CWallet& wallet, CConnman& connman, ChainstateMana
                 s_hashes_per_second2 = 0;
                 s_cpu_loading1 = 0;
 
-                if (SignBlock(chainman, pblockfilled, wallet, nTotalFees, i, nNonce, setCoins, stop_mining_pools)) {
+                if (SignBlock(chainman, pblockfilled, wallet, nTotalFees, i, nNonce, setCoins, true)) {
                     // Should always reach here unless we spent too much time processing transactions and the timestamp is now invalid
                     // CheckStake also does CheckBlock and AcceptBlock to propogate it to the network
                     bool validBlock = false;

@@ -15,12 +15,18 @@ static const unsigned int MAX_BLOCK_SERIALIZED_SIZE = 4000000;
 static const unsigned int MAX_BLOCK_WEIGHT = 4000000;
 /** The maximum allowed number of signature check operations in a block (network rule) */
 static const int64_t MAX_BLOCK_SIGOPS_COST = 80000;
-/** The fork start height of SatoshiPoW (network rule) */
-static const int64_t BITCOIN_POW256_START_HEIGHT = 23333;
-/** The fork start height to eliminate mining pools (network rule) */
-static const int64_t BITCOIN_ELIMINATE_MINING_POOLS_START_HEIGHT = 34000;
-/** The fork start height to eliminate mining pools (network rule) */
-static const int64_t BITCOIN_ELIMINATE_MINING_POOLS_PURE_POW_START_HEIGHT = 70383;
+/** Historical coin maturity boundary, required when replaying transactions. */
+static constexpr int HISTORICAL_COIN_MATURITY_HEIGHT = 23333;
+/** Marker used by the current mining algorithm. Older markers remain in the wire decoder only. */
+static constexpr uint32_t CURRENT_MINING_NONCE = 0xFEEDBEE2;
+/** Activate canonical block signatures, ASERT difficulty, and miner-only coinstake payouts. */
+static constexpr int NO_EXT_WORK_ACTIVATION_HEIGHT = 144444;
+/** One-time target increase at activation, retained in the ASERT reference. */
+static constexpr uint64_t ASERT_ACTIVATION_TARGET_MULTIPLIER = 1000;
+/** Number of fork blocks using the eased historical reference. */
+static constexpr int ASERT_TRANSITION_BLOCKS = 144;
+/** ASERT response time: twelve hours ahead/behind schedule doubles/halves difficulty. */
+static constexpr int64_t ASERT_HALF_LIFE = 12 * 60 * 60;
 /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */
 constexpr int COINBASE_MATURITY()
 {
@@ -28,7 +34,7 @@ constexpr int COINBASE_MATURITY()
 }
 constexpr int COINBASE_MATURITY( int n )
 {
-    if ( n < BITCOIN_POW256_START_HEIGHT )
+    if ( n < HISTORICAL_COIN_MATURITY_HEIGHT )
     {
         return 2;
     }

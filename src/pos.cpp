@@ -38,10 +38,8 @@ uint256 ComputeStakeModifier(const CBlockIndex* pindexPrev, const uint256& kerne
     return Hash(ss);
 }
 
-// Current PurePoW kernel: every eligible UTXO meets the kernel target.
-// Mining work is enforced by the block signature. Keep computing
-// the current proof hash for the block index, without the retired search loops.
-bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t blockFromTime, CAmount prevoutValue, const COutPoint& prevout, unsigned int nTimeBlock, uint32_t nNonce, uint256& hashProofOfStake, uint256& targetProofOfStake, bool fPrintProofOfStake)
+// Every eligible UTXO passes the kernel check; mining work is in the block signature.
+bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t blockFromTime, CAmount, const COutPoint& prevout, unsigned int nTimeBlock, uint32_t nNonce, uint256& hashProofOfStake, uint256& targetProofOfStake, bool)
 {
     if (nTimeBlock < blockFromTime)  // Transaction timestamp violation
         return error("CheckStakeKernelHash() : nTime violation");
@@ -49,47 +47,15 @@ bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t 
     if (nNonce != CURRENT_MINING_NONCE)
         return error("CheckStakeKernelHash() : retired mining marker");
 
-    // Base target with 0 PoS contribution
     arith_uint256 bnTarget;
     bnTarget.SetCompact(nBits);
-
     targetProofOfStake = ArithToUint256(bnTarget);
 
-    uint256 nStakeModifier = pindexPrev->nStakeModifier;
-
-    // Calculate hash
     CDataStream ss(SER_GETHASH, 0);
-    ss << nStakeModifier;
+    ss << pindexPrev->nStakeModifier;
     ss << blockFromTime << prevout.hash << prevout.n << nTimeBlock;
     hashProofOfStake = Hash(ss);
-
-    // Now check if hash meets target protocol
-    arith_uint256 actual = UintToArith256(hashProofOfStake);
-
-    const int h = ChainActive().Height();
-    const uint64_t data = actual.GetLow64();
-    const uint16_t a = (20000 + (data >> 0)) & 0xFF;
-    const uint16_t b = (18000 + (data >> 8)) & 0xFF;
-    const uint16_t c = (16000 + (data >> 16)) & 0xFF;
-    const uint16_t d = (14000 + (data >> 24)) & 0xFF;
-    const uint16_t e = (12000 + (data >> 32)) & 0xFF;
-    const uint16_t f = (10000 + (data >> 40)) & 0xFF;
-    const uint16_t g = (8000 + (data >> 48)) & 0xFF;
-    const auto& chain = gp_chainman->m_active_chainstate->m_chain;
-    if (h < std::max({a, b, c, d, e, f, g})) return false;
-
-    CDataStream proof(SER_GETHASH, 0);
-    proof << chain[h-a]->GetBlockHeader_hashMerkleRoot()
-          << chain[h-b]->GetBlockHeader_hashPrevBlock()
-          << chain[h-c]->GetBlockHeader_nBits()
-          << chain[h-d]->GetBlockHeader_nTime()
-          << chain[h-e]->GetBlockHeader_prevoutStakehash()
-          << chain[h-f]->GetBlockHeader_prevoutStaken()
-          << chain[h-g]->GetBlockHeader_vchBlockSig();
-    hashProofOfStake = Hash(proof);
-    // The current kernel target is uint256's maximum, so every hash qualifies.
     return true;
-
 }
 
 // Check kernel hash target and coinstake signature

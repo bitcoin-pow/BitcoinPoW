@@ -229,7 +229,7 @@ BOOST_AUTO_TEST_CASE(mining_fixed_signing_nonce_audit)
         BOOST_REQUIRE(pubkey.Verify(message, der));
         block.vchBlockSig = der;
         for (int shift = 56; shift >= 0; shift -= 8) block.vchBlockSig.push_back(nonce >> shift);
-        if (!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT)) continue;
+        if (!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT - 1)) continue;
         ++accepted;
         if (der.size() == 70) {
             // Trailing garbage must fail DER even when total length stays 79.
@@ -274,13 +274,41 @@ BOOST_AUTO_TEST_CASE(block_signature_size_activation)
             block.vchBlockSig = der;
             block.vchBlockSig.resize(der.size() + 8, 0);
             BOOST_CHECK(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT - 1));
-            const bool allowed = block.vchBlockSig.size() == 78 || block.vchBlockSig.size() == 79;
+            BOOST_CHECK(!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+            block.vchBlockSig = der;
+            const bool allowed = der.size() == 70 || der.size() == 71;
             BOOST_CHECK_EQUAL(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT), allowed);
             BOOST_CHECK_EQUAL(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT + 1), allowed);
-            block.vchBlockSig.resize(80, 0);
+            block.vchBlockSig.resize(72, 0);
             BOOST_CHECK(!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(nonce_free_signature_work)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    CBlock block;
+    block.nNonce = CURRENT_MINING_NONCE;
+    block.nTime = 1700000000;
+    const uint256 message = block.GetHashWithoutSign();
+    std::set<uint256> proof_hashes;
+    unsigned accepted = 0;
+    for (uint32_t attempt = 0; attempt < 64; ++attempt) {
+        std::vector<unsigned char> signature;
+        BOOST_REQUIRE(key.Sign(message, signature, false, attempt));
+        if (signature.size() != 70 && signature.size() != 71) continue;
+        block.vchBlockSig = signature;
+        BOOST_CHECK(CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+        BOOST_CHECK(key.GetPubKey().Verify(message, signature));
+        proof_hashes.insert(Hash(signature));
+        ++accepted;
+        block.vchBlockSig.resize(signature.size() + 8, 0);
+        BOOST_CHECK(!CheckBlockSignatureEncoding(block, NO_EXT_WORK_ACTIVATION_HEIGHT));
+    }
+    BOOST_CHECK_GT(accepted, 0U);
+    BOOST_CHECK_EQUAL(proof_hashes.size(), accepted);
 }
 
 BOOST_AUTO_TEST_CASE(miner_reward_destination_activation)
@@ -338,14 +366,14 @@ BOOST_AUTO_TEST_CASE(block_signature_encoding_activation)
     do {
         key.MakeNewKey(true);
         BOOST_REQUIRE(key.SignMining(hash, signature));
-    } while (signature.size() < 70);
+    } while (signature.size() != 70 && signature.size() != 71);
 
     for (uint32_t marker : {CURRENT_MINING_NONCE}) {
         CBlock block;
         block.nNonce = marker;
         auto set_signature = [&](const std::vector<unsigned char>& der) {
             block.vchBlockSig = der;
-            if (marker != 0xFEEDBEEF) block.vchBlockSig.resize(der.size() + 8, 0);
+            // The new fork commits only the DER bytes.
         };
         set_signature(signature);
         BOOST_CHECK(CheckBlockSignatureEncoding(block, 144443));

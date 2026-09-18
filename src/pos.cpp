@@ -39,7 +39,7 @@ uint256 ComputeStakeModifier(const CBlockIndex* pindexPrev, const uint256& kerne
 }
 
 // Current PurePoW kernel: every eligible UTXO meets the kernel target.
-// Mining work is enforced by the nonce-bearing block signature. Keep computing
+// Mining work is enforced by the block signature. Keep computing
 // the current proof hash for the block index, without the retired search loops.
 bool CheckStakeKernelHash(CBlockIndex* pindexPrev, unsigned int nBits, uint32_t blockFromTime, CAmount prevoutValue, const COutPoint& prevout, unsigned int nTimeBlock, uint32_t nNonce, uint256& hashProofOfStake, uint256& targetProofOfStake, bool fPrintProofOfStake)
 {

@@ -144,7 +144,7 @@ ChainstateManager *gp_chainman;
 kernel::BlockTreeDB *gp_blocktree;
 
 static bool CheckFirstCoinstakeOutput(const CBlock& block);
-static bool CheckBlockSignature(const CBlock& block);
+static bool CheckBlockSignature(const CBlock& block, bool allow_nonce_free = true);
 static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& state, const ChainstateManager& chainman, const CBlockIndex* pindexPrev);
 
 Chainstate *ChainstateActive()
@@ -2320,6 +2320,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (!CheckBlockSignatureEncoding(block, pindex->nHeight)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature-encoding", "non-canonical block signature");
     }
+    if (!trusted_history && pindex->nHeight < NO_EXT_WORK_ACTIVATION_HEIGHT &&
+        !CheckBlockSignature(block, false)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "bad historical block signature");
+    }
 
     // Reindex-chainstate must also authenticate historical witness commitments.
     if (trusted_history && !ContextualCheckBlock(block, state, m_chainman, pindex->pprev)) return false;
@@ -4118,6 +4122,11 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
     if (!CheckBlockSignatureEncoding(block, nHeight)) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature-encoding", "non-canonical block signature");
     }
+    const auto& checkpoint = chainman.GetConsensus().historical_checkpoint;
+    if (nHeight < NO_EXT_WORK_ACTIVATION_HEIGHT &&
+        (!checkpoint || nHeight > checkpoint->height) && !CheckBlockSignature(block, false)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "bad historical block signature");
+    }
 
     // Enforce BIP113 (Median Time Past).
     bool enforce_locktime_median_time_past{false};
@@ -4722,7 +4731,8 @@ VerifyDBResult CVerifyDB::VerifyDB(
         }
         // check level 1: verify block validity
         if (nCheckLevel >= 1 && (!CheckBlock(block, state, consensus_params, true, true, !chainstate.m_chainman.IsTrustedHistory(*pindex)) ||
-                                 !CheckBlockSignatureEncoding(block, pindex->nHeight))) {
+                                 !CheckBlockSignatureEncoding(block, pindex->nHeight) ||
+                                 (!chainstate.m_chainman.IsTrustedHistory(*pindex) && pindex->nHeight < NO_EXT_WORK_ACTIVATION_HEIGHT && !CheckBlockSignature(block, false)))) {
             LogPrintf("Verification error: found bad block at %d, hash=%s (%s)\n",
                       pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
             return VerifyDBResult::CORRUPTED_BLOCK_DB;
@@ -6602,10 +6612,10 @@ bool CheckBlockRewardDestination(const CBlock& block, int height)
     return true;
 }
 
-// Fork rule: 70 or 71 bytes of DER plus the eight-byte mining nonce.
+// Fork rule: the work field contains only a 70 or 71 byte DER signature.
 static bool IsForkBlockSignatureSize(size_t size)
 {
-    return size == 78 || size == 79;
+    return size == 70 || size == 71;
 }
 
 bool CheckBlockSignatureEncoding(const CBlock& block, int height)
@@ -6613,23 +6623,30 @@ bool CheckBlockSignatureEncoding(const CBlock& block, int height)
     if (height < NO_EXT_WORK_ACTIVATION_HEIGHT || block.IsProofOfWork()) return true;
 
     if (block.nNonce != CURRENT_MINING_NONCE || !IsForkBlockSignatureSize(block.vchBlockSig.size())) return false;
-    // The final eight bytes encode the mining nonce, not the DER signature.
-    std::vector<unsigned char> signature(block.vchBlockSig.begin(), block.vchBlockSig.end() - 8);
+    std::vector<unsigned char> signature = block.vchBlockSig;
     // CheckSignatureEncoding expects a transaction signature with a trailing
     // sighash byte. Append a dummy byte so it checks the entire block signature.
     signature.push_back(SIGHASH_ALL);
     return CheckSignatureEncoding(signature, SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_LOW_S, nullptr);
 }
 
-bool CheckBlockSignature(const CBlock& block)
+bool CheckBlockSignature(const CBlock& block, bool allow_nonce_free)
 {
     if (block.IsProofOfWork()) return block.vchBlockSig.empty();
     if (block.nNonce != CURRENT_MINING_NONCE) return false;
 
     std::vector<unsigned char> pubkey;
     if (!GetBlockPublicKey(block, pubkey)) return false;
-    // Historical bounds: the height-aware check enforces 78/79 bytes at the fork.
+    // Historical bounds: the height-aware check enforces 70/71 bytes at the fork.
     if (block.vchBlockSig.size() < 60 || block.vchBlockSig.size() > 84) return false;
+
+    arith_uint256 target;
+    target.SetCompact(block.nBits);
+    target = SIG_DIFF_ADJ * target;
+    if (allow_nonce_free && IsForkBlockSignatureSize(block.vchBlockSig.size())) {
+        if (CPubKey(pubkey).Verify(block.GetHashWithoutSign(), block.vchBlockSig) &&
+            UintToArith256(Hash(block.vchBlockSig)) <= target) return true;
+    }
 
     const auto nonce_begin = block.vchBlockSig.end() - 8;
     uint64_t nonce = 0;
@@ -6638,9 +6655,6 @@ bool CheckBlockSignature(const CBlock& block)
     const uint256 message = ArithToUint256(UintToArith256(block.GetHashWithoutSign()) + arith_uint256(nonce));
     if (!CPubKey(pubkey).Verify(message, signature)) return false;
 
-    arith_uint256 target;
-    target.SetCompact(block.nBits);
-    target = SIG_DIFF_ADJ * target;
     CDataStream stream(SER_GETHASH, 0);
     stream << nonce << signature;
     return UintToArith256(Hash(stream)) <= target;
@@ -6757,12 +6771,12 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
     if (pblock->IsProofOfStake() && !pblock->vchBlockSig.empty())
         return true;
 
-    bool require_fork_signature_size;
+    bool nonce_free_work;
     {
         LOCK(cs_main);
         const CBlockIndex* prev = chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock);
         if (!prev) return false;
-        require_fork_signature_size = prev->nHeight >= NO_EXT_WORK_ACTIVATION_HEIGHT - 1;
+        nonce_free_work = prev->nHeight >= NO_EXT_WORK_ACTIVATION_HEIGHT - 1;
     }
 
     bool retVal = false;
@@ -6789,13 +6803,9 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
 
             LogPrintf("ThreadStakeMiner(): STAGE2 BEGIN=========\n");
 
-            // Prevent mining pools by signing until a pow is found
-
-            // append a signature to our block and ensure that is LowS
-            // NOTE:
-            //      vchBlockSig can be quickly changed by changing the MerkleRoot without affecting the original hashproof from CreateCoinStake().
-            //      Using a 64 bit nonce gives everyone an easy way at finding a signature that meets a solution(no need for anyone to try
-            //      to manipulate the txs to update the MerkleRoot quicker).
+            // Search for signature work. Before the fork, the historical
+            // algorithm uses an external nonce; the new rule varies the
+            // signing attempt and carries only the DER signature.
             
             arith_uint256 bnTarget;
             uint256 hash_no_sig;
@@ -6895,34 +6905,11 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
                                     // GPU wrote a new candidate nonce (solution) - verify it on CPU
                                     prev_gpu_nonce = nonce;
 
-                                    mud = ArithToUint256( arith_hash_no_sig + arith_uint256(nonce) );
-
-                                    if ( key.SignMining(mud, vchBlockSig) )
+                                    if (key.Sign(hash_no_sig, vchBlockSig, false, nonce))
                                     {
-                                        CDataStream ss(SER_GETHASH, 0);
-                                        ss << nonce << vchBlockSig;
-                                        hashPoW = Hash(ss);
-                                        k++;
-
-                                        actual = UintToArith256(hashPoW);
-                                        if (actual <= bnTarget &&
-                                            (!require_fork_signature_size || IsForkBlockSignatureSize(vchBlockSig.size() + 8)))
-                                        {
-                                            LogPrintf("ThreadStakeMiner(): GPU nonce 0x%016llx MEETS TARGET\n", (unsigned long long)nonce);
-
-                                            if ( work_done.load() ) { break; }
-                                            work_done.store(true);
-
-                                            pblock->vchBlockSig.clear();
-                                            pblock->vchBlockSig.insert( pblock->vchBlockSig.end(), vchBlockSig.begin(), vchBlockSig.end() );
-                                            pblock->vchBlockSig.push_back(nonce>>56);
-                                            pblock->vchBlockSig.push_back(nonce>>48);
-                                            pblock->vchBlockSig.push_back(nonce>>40);
-                                            pblock->vchBlockSig.push_back(nonce>>32);
-                                            pblock->vchBlockSig.push_back(nonce>>24);
-                                            pblock->vchBlockSig.push_back(nonce>>16);
-                                            pblock->vchBlockSig.push_back(nonce>>8);
-                                            pblock->vchBlockSig.push_back(nonce>>0);
+                                        if (IsForkBlockSignatureSize(vchBlockSig.size()) &&
+                                            UintToArith256(Hash(vchBlockSig)) <= bnTarget) {
+                                            pblock->vchBlockSig = std::move(vchBlockSig);
                                             retVal = true;
                                             LogPrintf("ThreadStakeMiner(): STAGE2 FOUND GPU!!!==================== nonce: 0x%016llx\n", (unsigned long long)nonce);
                                             break;
@@ -6966,8 +6953,7 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
 
                                         // Now check if hash meets target protocol
                                         actual = UintToArith256(hashPoW);
-                                        if (actual <= bnTarget &&
-                                            (!require_fork_signature_size || IsForkBlockSignatureSize(vchBlockSig.size() + 8)))
+                                        if (actual <= bnTarget)
                                         {
                                             if ( work_done.load() )
                                             {

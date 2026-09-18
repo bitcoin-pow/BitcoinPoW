@@ -1,20 +1,20 @@
 # Bitcoin PoW (BTCW)
 
-Bitcoin PoW is a cryptocurrency with its own chain and wallet. BTCW blocks after the early proof-of-work period use a coin owned by the miner and a signature-based work search. The miner creates a coinstake transaction using an eligible unspent transaction output (UTXO), then searches for a block signature and 64-bit nonce whose hash meets the network target.
+Bitcoin PoW is a cryptocurrency with its own chain and wallet. BTCW blocks after the early proof-of-work period use a coin owned by the miner and a signature-based work search. The miner creates a coinstake transaction using an eligible unspent transaction output (UTXO), then searches for a block signature whose hash meets the network target.
 
 BTCW aims to make mining practical for people running their own wallets and to make conventional pool arrangements harder. Its rules tie mining to a coin owner, but they do **not** guarantee that pools cannot exist or that every mining attempt has the same computational cost.
 
 ## How mining works
 
 1. **Choose an eligible coin.** The wallet selects a mature UTXO it can spend and creates a coinstake transaction. The current kernel check does not give larger UTXOs more mining weight; owning more eligible UTXOs can provide more choices of mining input.
-2. **Search for work.** The miner signs a message derived from the unsigned block header and an external 64-bit nonce. It hashes the nonce and signature and repeats until that hash is at or below the target set by the block difficulty.
+2. **Search for work.** The miner signs the unsigned block header, varying the internal ECDSA signing nonce between attempts. It hashes the DER signature and repeats until that hash is at or below the target set by the block difficulty.
 3. **Verify the block.** Nodes check the coinstake spend, the relationship between the stake coin and the mining key, the block signature, the work target, and the block's other consensus rules.
 
 The early chain used ordinary proof of work. Current mining combines UTXO ownership with a signature-based proof-of-work search. “Proof of Transactions” appears in older descriptions of BTCW, but there is no separate transaction-count mining stage in the current rules.
 
 ## Rules from block 144444
 
-The rules activated at height **144444** require canonical, low-S block signatures and switch difficulty adjustment to ASERT. They also require every positive coinstake output to pay the same public key used for block signing. This includes the returned stake and the claimed block reward; a miner cannot put a positive coinstake payout directly into another key's output.
+The rules activated at height **144444** require canonical, low-S block signatures without an external mining nonce and switch difficulty adjustment to ASERT. They also require every positive coinstake output to pay the same public key used for block signing. This includes the returned stake and the claimed block reward; a miner cannot put a positive coinstake payout directly into another key's output.
 
 These are consensus rules: nodes reject blocks that break them. They do not control payments a miner makes later, nor do they prove that a miner cannot arrange to share work with others. Reusing private ECDSA signing state can also reduce the work needed for repeated mining trials. See the [signature reuse audit](doc/signature-reuse-audit.md) for the details and limits of that finding.
 

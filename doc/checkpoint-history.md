@@ -17,10 +17,9 @@ by this mandatory header checkpoint:
    not evaluated. Existing `assumevalid` script-check behavior is unchanged.
 3. From **141411** through **144443**, enforce the current PurePoW mining rules
    and the `0xFEEDBEE2` marker.
-4. From **144444**, additionally require strict DER and low-S block signatures,
-   excluding the final eight nonce bytes from the encoding check. The complete
-   signature field must be exactly 78 or 79 bytes (70/71 DER bytes plus the nonce).
-   CPU mining and CPU verification of GPU candidates skip shorter signatures. Difficulty switches
+4. From **144444**, additionally require strict DER and low-S block signatures
+   with no external mining nonce. The complete signature field must be exactly
+   70 or 71 bytes and its hash must meet the work target. Difficulty switches
    from historical LWMA3 to ASERT with a 12-hour half-life and 600-second target.
 
 The old mining searches and old signing algorithm are removed. Historical wire

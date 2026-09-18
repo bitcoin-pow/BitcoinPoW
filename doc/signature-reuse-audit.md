@@ -1,9 +1,13 @@
 # Signature-work reuse audit
 
+This audit describes the historical nonce-bearing rules through block 144443.
+From block 144444, miners sign the unsigned header directly and hash the DER
+signature; the eight-byte external nonce is absent.
+
 ## Result
 
-**High severity for the intended mining-cost model: the fork at 144444 does not
-require a fresh expensive ECDSA signing computation for every mining trial.**
+**Historical finding for the nonce-bearing mining rules before height 144444:
+those rules did not require a fresh expensive ECDSA signing computation for every mining trial.**
 A miner can reuse the internal ECDSA signing nonce within a private search,
 precompute its elliptic-curve point and inverse, and produce valid signatures
 for different external 64-bit mining nonces using scalar arithmetic.
@@ -60,23 +64,23 @@ without calling a signing API or doing per-candidate elliptic-curve signing
 work. It uses the production header-message construction, then checks:
 
 - ECDSA verification for every generated signature;
-- the fork's 78/79-byte, strict-DER and low-S rules;
+- the historical nonce-bearing signature and proof hash;
 - recovery of the same committed public key;
 - distinct proof hashes for accepted external nonces;
 - failure of literal signature reuse with the next external nonce;
 - rejection of appended garbage even when the total field remains 79 bytes.
 
-Observed result: **255 of 256 candidates passed the fork encoding rules**,
+The original audit observed **255 of 256 candidates passing the former 78/79-byte fork encoding rules**,
 with distinct proof hashes and successful public-key recovery. All 256 ECDSA
 signatures verified; one was too short for the fork size rule. The combined
 `pow_tests,validation_tests` run passed all **31 tests**.
 
 This exercises the relevant primitives, not a full mainnet block connection,
 UTXO spend, or a search for a winning mainnet proof. The remaining target search
-is still required. Production consensus and miner code were not changed by this
-audit.
+is still required. The current rule at 144444 removes the external nonce.
+The reproducer now checks historical behavior immediately before activation.
 
-## Other paths reviewed
+## Other paths reviewed under the historical rules
 
 | Candidate shortcut | Result in reviewed code |
 | --- | --- |
@@ -86,7 +90,7 @@ audit.
 | Reuse identical signature while changing external nonce | The message changes; test rejects reuse. No general bypass found. |
 | Change block transactions, parent, target, time, stake outpoint, or mining marker | These are committed directly or through the Merkle root in the signed header. No free proof-hash variation found. |
 | Recover a different signing key to fit a chosen signature | Full validation binds the coinstake input/output key and checks the block signature. Recovery alone is not block acceptance. |
-| Use the old nonce-free recovery fallback | It remains in `CheckRecoveredPubKeyFromBlockSignature`, but full block signature verification still requires the nonce-bearing message. No full-block bypass established. |
+| Use nonce-free recovery | From 144444 the complete DER signature verifies against the unsigned header hash. Before activation, nonce-bearing work still requires its historical message. |
 | Avoid signatures by using a PoW marker | Mainnet block connection rejects PoW blocks after height 10. |
 | Cache or checkpoint bypass | Height-aware encoding is rechecked during connection; trusted-history exemption ends at 141410. No post-fork bypass found in these reviewed paths. |
 
@@ -94,4 +98,3 @@ The message uses addition modulo 2^256 before ECDSA scalar interpretation.
 Cross-header compensation and ECDSA message equivalences were considered, but
 no practical method to exploit them was demonstrated. This is not a proof of
 security or an exhaustive cryptographic audit.
-

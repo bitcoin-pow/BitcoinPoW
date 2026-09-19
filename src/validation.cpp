@@ -6771,12 +6771,10 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
     if (pblock->IsProofOfStake() && !pblock->vchBlockSig.empty())
         return true;
 
-    bool nonce_free_work;
     {
         LOCK(cs_main);
         const CBlockIndex* prev = chainman.m_blockman.LookupBlockIndex(pblock->hashPrevBlock);
         if (!prev) return false;
-        nonce_free_work = prev->nHeight >= NO_EXT_WORK_ACTIVATION_HEIGHT - 1;
     }
 
     bool retVal = false;
@@ -6814,9 +6812,12 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
             bnTarget = SIG_DIFF_ADJ*bnTarget;
 
             hash_no_sig = pblock->GetHashWithoutSign();
+            const int64_t stage2_timeout_seconds = gArgs.GetIntArg("-stage2timeout", DEFAULT_STAGE2_TIMEOUT_SECONDS);
+            const auto stage2_deadline = SteadyClock::now() + std::chrono::seconds{stage2_timeout_seconds};
 
-            // Use hardware concurrency threads: thread 0 handles GPU (with CPU fallback), threads 1+ do CPU mining
-            const int num_threads = std::max(1, std::min((int)gArgs.GetIntArg("-miningthreads", 1), (int)std::thread::hardware_concurrency()));
+            // Stage 2 currently has one GPU worker. Rebuild the template after
+            // the configured timeout so its 32-bit signing nonce starts on a new header.
+            const int num_threads = 1;
             static util::ThreadPool tp(num_threads);
             std::atomic<bool> work_done{false};
 
@@ -6850,20 +6851,8 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
                             try
                             {
                                 //===========THREAD Work BEGIN===========
-                                uint64_t tidx = thread_idx;
-                                int64_t start_time = GetTime<std::chrono::milliseconds>().count();
-                                                                
-                                // Chunk up the work across all threads - CPU uses lower half of 64 bits, GPU will use upper half
-                                uint64_t loops_per_thread = (uint64_t)0x0100000000000000ULL;
-                                uint64_t offset = loops_per_thread*tidx;// + (uint64_t)0x0000FFFFFFFFFFFF;
                                 uint64_t nonce;
                                 std::vector<unsigned char> vchBlockSig;
-                                uint256 hashPoW;
-                                uint256 mud;
-                                arith_uint256 actual;
-
-                                arith_uint256 arith_hash_no_sig = UintToArith256(hash_no_sig);
-                                int k = 0;
 
                                 // THREAD0 polls GPU via shared memory.
                                 // GPU miner protocol: writes SENTINEL (0x0707...) = "working, no solution yet",
@@ -6873,6 +6862,10 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
                                 uint64_t prev_gpu_nonce = shared_data->nonce;
                                 while( thread_idx == 0 )
                                 {
+                                    if (SteadyClock::now() >= stage2_deadline) {
+                                        LogPrintf("ThreadStakeMiner(): STAGE2 timed out after %d seconds; rebuilding work\n", stage2_timeout_seconds);
+                                        break;
+                                    }
                                     nonce = shared_data->nonce;
 
                                     // Nonce unchanged, zero, or sentinel = GPU still working, sleep and check exit conditions
@@ -6907,16 +6900,19 @@ bool SignBlock(ChainstateManager& chainman, std::shared_ptr<CBlock> pblock, wall
 
                                     if (key.Sign(hash_no_sig, vchBlockSig, false, nonce))
                                     {
+                                        const uint256 signature_hash{Hash(vchBlockSig)};
                                         if (IsForkBlockSignatureSize(vchBlockSig.size()) &&
-                                            UintToArith256(Hash(vchBlockSig)) <= bnTarget) {
+                                            UintToArith256(signature_hash) <= bnTarget) {
                                             pblock->vchBlockSig = std::move(vchBlockSig);
                                             retVal = true;
-                                            LogPrintf("ThreadStakeMiner(): STAGE2 FOUND GPU!!!==================== nonce: 0x%016llx\n", (unsigned long long)nonce);
+                                            LogPrintf("ThreadStakeMiner(): STAGE2 FOUND GPU!!!==================== nonce: 0x%016llx hash=%s\n",
+                                                      (unsigned long long)nonce, signature_hash.ToString());
                                             break;
                                         }
                                         else
                                         {
-                                            LogPrintf("ThreadStakeMiner(): GPU nonce 0x%016llx did NOT meet target, continuing poll\n", (unsigned long long)nonce);
+                                            LogPrintf("ThreadStakeMiner(): GPU nonce 0x%016llx hash=%s did NOT meet target, continuing poll\n",
+                                                      (unsigned long long)nonce, signature_hash.ToString());
                                         }
 
                                         if ( work_done.load() ) {

@@ -22,7 +22,7 @@ static constexpr uint32_t CURRENT_MINING_NONCE = 0xFEEDBEE2;
 /** Activate canonical block signatures, ASERT difficulty, and miner-only coinstake payouts. */
 static constexpr int NO_EXT_WORK_ACTIVATION_HEIGHT = 144444;
 /** One-time target increase at activation, retained in the ASERT reference. */
-static constexpr uint64_t ASERT_ACTIVATION_TARGET_MULTIPLIER = 1000;
+static constexpr uint64_t ASERT_ACTIVATION_TARGET_MULTIPLIER = 10000;
 /** Number of fork blocks using the eased historical reference. */
 static constexpr int ASERT_TRANSITION_BLOCKS = 144;
 /** ASERT response time: twelve hours ahead/behind schedule doubles/halves difficulty. */

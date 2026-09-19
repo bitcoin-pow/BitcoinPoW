@@ -28,6 +28,7 @@ class uint256;
 static const uint32_t STAKE_TIMESTAMP_MASK = 0; // CPU can hash as fast as possible
 static const uint64_t POW_POT_DIFF_HELPER = 1000000; // help the transition to PoW/PoT not take a year.(Section1 diff)
 static const uint64_t SIG_DIFF_ADJ = 10000000; // Adjust the signature diff (Section2 diff)
+static constexpr int64_t DEFAULT_STAGE2_TIMEOUT_SECONDS{30};
 
 struct CStakeCache{
     CStakeCache(uint32_t blockFromTime_, CAmount amount_) : blockFromTime(blockFromTime_), amount(amount_){

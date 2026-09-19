@@ -64,15 +64,15 @@ needed to validate headers downloaded from genesis. Changing them retroactively
 would reject existing history.
 
 For blocks 144444 through 144587, ASERT calculates each target from the target at
-block 144443 multiplied by 1000, capped at the network target limit, and the
+block 144443 multiplied by 10000, capped at the network target limit, and the
 timestamp of block 144443 on the same branch. This makes the first fork block
-1000 times easier, subject to the limit and compact target rounding. It compares
+10000 times easier, subject to the limit and compact target rounding. It compares
 elapsed time with the expected 600 seconds per block. Being 12 hours ahead of
 schedule halves the target (doubles difficulty); being 12 hours behind doubles
 the target. Targets are bounded between one and the network proof-of-work limit.
 The first upgraded block uses the eased reference directly. Through block 144587, subsequent blocks
 keep that same reference and adjust for elapsed time since block 144443; the
-1000-fold easing is not reapplied per block. The final pre-fork solve time does
+10000-fold easing is not reapplied per block. The final pre-fork solve time does
 not affect the reset.
 
 The integer polynomial follows the [ASERT specification](https://upgradespecs.bitcoincashnode.org/2020-11-15-asert/),

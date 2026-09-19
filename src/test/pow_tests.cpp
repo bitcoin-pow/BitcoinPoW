@@ -237,12 +237,12 @@ BOOST_AUTO_TEST_CASE(asert_activation_and_branches)
     CBlockHeader candidate;
     // Last pre-fork target preserves LWMA's historical truncation.
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[45], &candidate, params), 0x1b00ffffU);
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c03e800U);
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c03e800U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c271000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c271000U);
     blocks[47].nTime += ASERT_HALF_LIFE;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c07d000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
     candidate.nTime = std::numeric_limits<uint32_t>::max();
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c07d000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
     CBlockIndex alternative_anchor;
     alternative_anchor.nHeight = blocks[46].nHeight;
     alternative_anchor.nTime = blocks[46].nTime;
@@ -252,11 +252,11 @@ BOOST_AUTO_TEST_CASE(asert_activation_and_branches)
     alternative_tip.nHeight = blocks[47].nHeight;
     alternative_tip.nTime = blocks[47].nTime;
     alternative_tip.pprev = &alternative_anchor;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&alternative_tip, &candidate, params), 0x1c0fa000U);
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c07d000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&alternative_tip, &candidate, params), 0x1d009c40U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
     // The reset must not inherit the solve time of the last legacy block.
     blocks[45].nTime -= ASERT_HALF_LIFE;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c03e800U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c271000U);
     // An already-easy reference saturates at the network limit.
     blocks[46].nBits = UintToArith256(params.powLimit).GetCompact();
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), blocks[46].nBits);
@@ -285,7 +285,7 @@ BOOST_AUTO_TEST_CASE(asert_transition_reference_expires)
         blocks[i].nBits = GetNextWorkRequired(&blocks[i - 1], &candidate, params);
     }
     const int anchor = ASERT_TRANSITION_BLOCKS;
-    BOOST_CHECK_EQUAL(blocks[1].nBits, 0x1c03e800U);
+    BOOST_CHECK_EQUAL(blocks[1].nBits, 0x1c271000U);
     BOOST_CHECK(blocks[anchor].nBits != blocks[1].nBits);
     BOOST_CHECK_EQUAL(blocks[anchor + 1].nHeight, 144588);
     BOOST_CHECK_EQUAL(blocks[anchor + 1].nBits, blocks[anchor].nBits);

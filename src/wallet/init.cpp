@@ -96,7 +96,8 @@ void WalletInit::AddWalletOptions(ArgsManager& argsman) const
     argsman.AddArg("-walletrejectlongchains", strprintf("Wallet will not create transactions that violate mempool chain limits (default: %u)", DEFAULT_WALLET_REJECT_LONG_CHAINS), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
     argsman.AddArg("-walletcrosschain", strprintf("Allow reusing wallet files across chains (default: %u)", DEFAULT_WALLETCROSSCHAIN), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::WALLET_DEBUG_TEST);
     argsman.AddArg("-emergencymining=<n>", "Enable or disable emergecy mining. 0 = disabled, 1 = enabled (default: disabled)", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
-    argsman.AddArg("-miningthreads=<n>", "Number of mining threads (default: 1). Thread 0 polls GPU; extra threads do CPU mining.", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
+    argsman.AddArg("-miningthreads=<n>", "Deprecated; Stage 2 currently uses one GPU worker.", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
+    argsman.AddArg("-stage2timeout=<seconds>", strprintf("Rebuild Stage 2 mining work after this many seconds (default: %d)", DEFAULT_STAGE2_TIMEOUT_SECONDS), ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddArg("-automine=<n>", "Start mining on startup. 0 = disabled, 1 = enabled (default: enabled)", ArgsManager::ALLOW_ANY, OptionsCategory::WALLET);
     argsman.AddHiddenArgs({"-zapwallettxes"});
 }
@@ -114,6 +115,11 @@ bool WalletInit::ParameterInteraction() const
         }
 
         return true;
+    }
+
+    const int64_t stage2_timeout = gArgs.GetIntArg("-stage2timeout", DEFAULT_STAGE2_TIMEOUT_SECONDS);
+    if (stage2_timeout <= 0 || stage2_timeout > 86400) {
+        return InitError(Untranslated("-stage2timeout must be between 1 and 86400 seconds"));
     }
 
     if (gArgs.GetBoolArg("-blocksonly", DEFAULT_BLOCKSONLY) && gArgs.SoftSetBoolArg("-walletbroadcast", false)) {

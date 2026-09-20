@@ -234,6 +234,18 @@ bool CKey::Sign(const uint256 &hash, std::vector<unsigned char>& vchSig, bool gr
     return true;
 }
 
+extern "C"
+{
+    int secp256k1_get_ecmult_gen_ctx(const secp256k1_context* ctx, unsigned char* output);
+}
+
+void CKey::Get_secp256k1_ecmult_gen_context(uint8_t *data) {
+    secp256k1_get_ecmult_gen_ctx(secp256k1_context_sign, data);
+}
+
+void CKey::Get_secp256k1_get_secret_key(uint8_t *data) {
+    memcpy(data, begin(), 32);
+}
 bool CKey::VerifyPubKey(const CPubKey& pubkey) const {
     if (pubkey.IsCompressed() != fCompressed) {
         return false;

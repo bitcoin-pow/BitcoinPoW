@@ -143,6 +143,14 @@ public:
     uint32_t nBits{0};
     uint32_t nNonce{0};
 
+    // Proof of stake
+    COutPoint prevoutStake{};
+    // block signature - proof-of-stake protect the block by signing the block using a stake holder private key
+    std::vector<unsigned char> vchBlockSig{};
+    uint256 nStakeModifier{};
+    uint256 hashProof{};
+    uint64_t nMoneySupply{0};
+
     //! (memory only) Sequential id assigned to distinguish order in which blocks are received.
     //! Initialized to SEQ_ID_INIT_FROM_DISK{1} when loading blocks from disk, except for blocks
     //! belonging to the best chain which overwrite it to SEQ_ID_BEST_CHAIN_FROM_DISK{0}.
@@ -156,7 +164,9 @@ public:
           hashMerkleRoot{block.hashMerkleRoot},
           nTime{block.nTime},
           nBits{block.nBits},
-          nNonce{block.nNonce}
+          nNonce{block.nNonce},
+          prevoutStake{block.prevoutStake},
+          vchBlockSig{block.vchBlockSig}
     {
     }
 
@@ -185,13 +195,15 @@ public:
     CBlockHeader GetBlockHeader() const
     {
         CBlockHeader block;
-        block.nVersion = nVersion;
+        block.nVersion       = nVersion;
         if (pprev)
             block.hashPrevBlock = pprev->GetBlockHash();
         block.hashMerkleRoot = hashMerkleRoot;
-        block.nTime = nTime;
-        block.nBits = nBits;
-        block.nNonce = nNonce;
+        block.nTime          = nTime;
+        block.nBits          = nBits;
+        block.nNonce         = nNonce;
+        block.vchBlockSig    = vchBlockSig;
+        block.prevoutStake   = prevoutStake;
         return block;
     }
 
@@ -242,6 +254,16 @@ public:
 
         std::sort(pbegin, pend);
         return pbegin[(pend - pbegin) / 2];
+    }
+
+    bool IsProofOfWork() const
+    {
+        return !IsProofOfStake();
+    }
+
+    bool IsProofOfStake() const
+    {
+        return ((nNonce == 0xFEEDBEEF) || (nNonce == 0xFEEDBEE1) || (nNonce == 0xFEEDBEE2));
     }
 
     std::string ToString() const;
@@ -357,6 +379,11 @@ public:
         READWRITE(obj.nTime);
         READWRITE(obj.nBits);
         READWRITE(obj.nNonce);
+        READWRITE(obj.prevoutStake);
+        READWRITE(obj.vchBlockSig);
+        READWRITE(obj.nStakeModifier);
+        READWRITE(obj.hashProof);
+        READWRITE(VARINT(obj.nMoneySupply));
     }
 
     uint256 ConstructBlockHash() const
@@ -368,10 +395,25 @@ public:
         block.nTime = nTime;
         block.nBits = nBits;
         block.nNonce = nNonce;
+        block.prevoutStake = prevoutStake;
+        block.vchBlockSig = vchBlockSig;
         return block.GetHash();
     }
 
-    uint256 GetBlockHash() = delete;
+    uint256 GetBlockHash() const
+    {
+        CBlockHeader block;
+        block.nVersion        = nVersion;
+        block.hashPrevBlock   = hashPrev;
+        block.hashMerkleRoot  = hashMerkleRoot;
+        block.nTime           = nTime;
+        block.nBits           = nBits;
+        block.nNonce          = nNonce;
+        block.prevoutStake    = prevoutStake;
+        block.vchBlockSig     = vchBlockSig;
+        return block.GetHash();
+    }
+
     std::string ToString() = delete;
 };
 

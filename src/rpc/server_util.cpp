@@ -6,6 +6,7 @@
 
 #include <chain.h>
 #include <common/args.h>
+#include <consensus/consensus.h>
 #include <net_processing.h>
 #include <node/context.h>
 #include <node/miner.h>
@@ -140,7 +141,7 @@ void NextEmptyBlockIndex(CBlockIndex& tip, const Consensus::Params& consensusPar
     next_header.hashPrevBlock  = tip.GetBlockHash();
     UpdateTime(&next_header, consensusParams, &tip);
     next_header.nBits = GetNextWorkRequired(&tip, &next_header, consensusParams);
-    next_header.nNonce = 0;
+    next_header.nNonce = tip.nHeight + 1 > consensusParams.nLastPOWBlock ? CURRENT_MINING_NONCE : 0;
 
     next_index.pprev = &tip;
     next_index.nTime = next_header.nTime;

@@ -29,13 +29,15 @@
 #include <util/string.h>
 #include <util/time.h>
 #include <util/ui_change_type.h>
+#include <wallet/coinselection.h>
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
 #include <wallet/walletutil.h>
-
+#include <pos.h>
+#include <net.h>
 #include <atomic>
 #include <cassert>
 #include <cstddef>
@@ -47,6 +49,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -57,6 +60,7 @@ class CKey;
 class CKeyID;
 class CPubKey;
 class Coin;
+class CTxMemPool;
 class SigningProvider;
 enum class MemPoolRemovalReason;
 enum class SigningResult;
@@ -84,6 +88,9 @@ struct bilingual_str;
 
 namespace wallet {
 struct WalletContext;
+
+/** Build the coinstake payout that returns principal, subsidy, and fees to the staking key. */
+CTxOut CreateCoinStakeOutput(CAmount principal, CAmount fees, CAmount subsidy, const CPubKey& pubkey);
 
 //! Explicitly delete the wallet.
 //! Blocks the current thread until the wallet is destructed.
@@ -138,14 +145,14 @@ constexpr CAmount DEFAULT_TRANSACTION_MAXFEE{COIN / 10};
 //! Discourage users to set fees higher than this amount (in satoshis) per kB
 constexpr CAmount HIGH_TX_FEE_PER_KB{COIN / 100};
 //! -maxtxfee will warn if called with a higher fee than this amount (in satoshis)
-constexpr CAmount HIGH_MAX_TX_FEE{100 * HIGH_TX_FEE_PER_KB};
+constexpr CAmount HIGH_MAX_TX_FEE{100000 * HIGH_TX_FEE_PER_KB};
 //! Pre-calculated constants for input size estimation in *virtual size*
 static constexpr size_t DUMMY_NESTED_P2WPKH_INPUT_SIZE = 91;
 
 class CCoinControl;
 
 //! Default for -addresstype
-constexpr OutputType DEFAULT_ADDRESS_TYPE{OutputType::BECH32};
+constexpr OutputType DEFAULT_ADDRESS_TYPE{OutputType::LEGACY};
 
 static constexpr uint64_t KNOWN_WALLET_FLAGS =
         WALLET_FLAG_AVOID_REUSE
@@ -332,6 +339,7 @@ private:
     // 'std::numeric_limits<int64_t>::max()' if wallet is blank.
     std::atomic<int64_t> m_birth_time{std::numeric_limits<int64_t>::max()};
 
+    std::map<COutPoint, CStakeCache> stakeCache;
     /**
      * Used to keep track of spent outpoints, and
      * detect and report conflicts (double-spends or
@@ -483,6 +491,7 @@ public:
 
     ~CWallet()
     {
+        StopStakeMining();
         // Should not have slots connected at this point.
         assert(NotifyUnload.empty());
     }
@@ -740,6 +749,13 @@ public:
     /** Absolute maximum transaction fee (in satoshis) used by default for the wallet */
     CAmount m_default_max_tx_fee{DEFAULT_TRANSACTION_MAXFEE};
 
+    std::atomic<bool> m_stake_mining_stop{false};
+    std::atomic<bool> m_stake_mining_active{false};
+    std::thread m_stake_mining_thread;
+    Mutex m_stake_mining_mutex;
+    Mutex m_stake_thread_mutex;
+
+
     /** Number of pre-generated keys/scripts by each spkm (part of the look-ahead process, used to detect payments) */
     int64_t m_keypool_size{DEFAULT_KEYPOOL_SIZE};
 
@@ -756,6 +772,16 @@ public:
         // Don't include change addresses by default
         bool ignore_change{true};
     };
+
+
+    uint64_t GetStakeWeight() const;
+    bool CreateCoinStake(ChainstateManager& chainman, const CWallet &wallet, unsigned int nBits, const CAmount& nTotalFees, uint32_t &nTimeBlock, uint32_t nNonce, CMutableTransaction& tx, CKey& key, const std::set<std::pair<const CWalletTx*,unsigned int> >& setCoins);
+    bool SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) const;
+    std::optional<uint256> MineStakeBlock(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds);
+    void SelectCoinsForStaking(std::set<std::pair<const CWalletTx*,unsigned int> >& setCoinsRet) const;
+    bool StartStakeMining(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds);
+    void StopStakeMining();
+    bool IsStakeMining() const { return m_stake_mining_active.load(); }
 
     /**
      * Filter and retrieve destinations stored in the addressbook

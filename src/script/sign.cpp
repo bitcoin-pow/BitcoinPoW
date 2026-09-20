@@ -921,6 +921,40 @@ void SignatureData::MergeSignatureData(SignatureData sigdata)
     signatures.insert(std::make_move_iterator(sigdata.signatures.begin()), std::make_move_iterator(sigdata.signatures.end()));
 }
 
+bool SignSignature(const SigningProvider &provider, const CScript& fromPubKey, CMutableTransaction& txTo, unsigned int nIn, const CAmount& amount, int nHashType, SignatureData& sig_data)
+{
+    assert(nIn < txTo.vin.size());
+
+    MutableTransactionSignatureCreator creator(txTo, nIn, amount, nHashType);
+
+    bool ret = ProduceSignature(provider, creator, fromPubKey, sig_data);
+    UpdateInput(txTo.vin.at(nIn), sig_data);
+    return ret;
+}
+
+bool SignSignature(const SigningProvider &provider, const CTransaction& txFrom, CMutableTransaction& txTo, unsigned int nIn, int nHashType, SignatureData& sig_data)
+{
+    assert(nIn < txTo.vin.size());
+    const CTxIn& txin = txTo.vin[nIn];
+    assert(txin.prevout.n < txFrom.vout.size());
+    const CTxOut& txout = txFrom.vout[txin.prevout.n];
+
+    return SignSignature(provider, txout.scriptPubKey, txTo, nIn, txout.nValue, nHashType, sig_data);
+}
+
+bool VerifySignature(const Coin& coin, const Txid& txFromHash, const CTransaction& txTo, unsigned int nIn, script_verify_flags flags)
+{
+    TransactionSignatureChecker checker(&txTo, nIn, coin.out.nValue, MissingDataBehavior::FAIL);
+
+    const CTxIn& txin = txTo.vin[nIn];
+    const CTxOut& txout = coin.out;
+
+    if (txin.prevout.hash != txFromHash)
+        return false;
+
+    return VerifyScript(txin.scriptSig, txout.scriptPubKey, nullptr, flags, checker);
+}
+
 namespace {
 /** Dummy signature checker which accepts all signatures. */
 class DummySignatureChecker final : public BaseSignatureChecker
@@ -986,6 +1020,25 @@ public:
 
 const BaseSignatureCreator& DUMMY_SIGNATURE_CREATOR = DummySignatureCreator(32, 32);
 const BaseSignatureCreator& DUMMY_MAXIMUM_SIGNATURE_CREATOR = DummySignatureCreator(33, 32);
+
+bool IsSolvable(const SigningProvider& provider, const CScript& script)
+{
+    // This check is to make sure that the script we created can actually be solved for and signed by us
+    // if we were to have the private keys. This is just to make sure that the script is valid and that,
+    // if found in a transaction, we would still accept and relay that transaction. In particular,
+    // it will reject witness outputs that require signing with an uncompressed public key.
+    SignatureData sigs;
+    // Make sure that STANDARD_SCRIPT_VERIFY_FLAGS includes SCRIPT_VERIFY_WITNESS_PUBKEYTYPE, the most
+    // important property this function is designed to test for.
+    static_assert(STANDARD_SCRIPT_VERIFY_FLAGS & SCRIPT_VERIFY_WITNESS_PUBKEYTYPE, "IsSolvable requires standard script flags to include WITNESS_PUBKEYTYPE");
+    if (ProduceSignature(provider, DUMMY_SIGNATURE_CREATOR, script, sigs)) {
+        // VerifyScript check is just defensive, and should never fail.
+        bool verified = VerifyScript(sigs.scriptSig, script, &sigs.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, DUMMY_CHECKER);
+        assert(verified);
+        return true;
+    }
+    return false;
+}
 
 bool IsSegWitOutput(const SigningProvider& provider, const CScript& script)
 {

@@ -1,123 +1,138 @@
-v31.x Release Notes
-===================
+BitcoinPoW Core 31.x Release Notes
+==================================
 
-Bitcoin Core version 31.x is now available from:
+BitcoinPoW Core 31.x updates the BTCW node and wallet to the Bitcoin Core 31.x
+codebase while preserving BTCW's network, chain history, and consensus rules.
+This software is for the BitcoinPoW (BTCW) network. It must not be used with a
+Bitcoin data directory or Bitcoin chain data.
 
-  <https://bitcoincore.org/bin/bitcoin-core-31.x/>
+Report problems at:
 
-This release includes various bug fixes and performance
-improvements, as well as updated translations.
+  <https://github.com/bitcoin-pow/BitcoinPoW/issues>
 
-Please report bugs using the issue tracker at GitHub:
+Downloads and project information are available at:
 
-  <https://github.com/bitcoin/bitcoin/issues>
+  <https://btcw.space>
 
-To receive security and update notifications, please subscribe to:
+Important consensus change
+==========================
 
-  <https://bitcoincore.org/en/list/announcements/join/>
+The new BTCW rules activate at block height **144444**.
 
-How to Upgrade
+From that height, nodes enforce:
+
+- Canonical low-S DER block signatures.
+- Block signatures without the legacy external nonce suffix.
+- The current BTCW mining marker in the block header.
+- ASERT difficulty adjustment using BTCW's activation anchor.
+- Positive coinstake outputs must pay the same public key that signs the block.
+
+Every miner and validating node must upgrade before activation. Nodes running
+incompatible consensus code may follow or produce an invalid chain after the
+activation height.
+
+Historical BTCW blocks retain their original validation and serialization
+rules. The new rules do not reinterpret pre-activation blocks.
+
+Mining
+======
+
+BTCW mining has two stages:
+
+1. The wallet selects a mature, locally spendable staking UTXO and constructs
+   the coinstake transaction.
+2. The external GPU worker searches ECDSA signing nonces for a DER signature
+   whose hash satisfies the network target.
+
+This release adds wallet RPCs for mining:
+
+- `setstaking true 30` starts continuous staking.
+- `setstaking false` stops continuous staking.
+- `getstakinginfo` reports mining state and eligible stake value.
+- `generatestake 30` performs one mining attempt.
+
+Stage 1 currently accepts P2PK and legacy P2PKH outputs with at least six
+confirmations. SegWit, wrapped SegWit, and Taproot outputs are not selected for
+staking. Encrypted wallets must be unlocked. Watch-only and external-signer
+wallets cannot mine locally.
+
+Stage 2 communicates through the `/shared_mem` POSIX shared-memory object. On
+Linux this normally appears as `/dev/shm/shared_mem`. The node and GPU worker
+must run as the same operating-system user.
+
+The node logs every distinct GPU result, including its nonce, signature-work
+hash, target, signature size, and whether it met the target. An accepted block
+is logged separately with its block hash.
+
+See [`MINING.md`](../MINING.md) for setup and troubleshooting instructions.
+
+Wallet changes
 ==============
 
-If you are running an older version, shut it down. Wait until it has completely
-shut down (which might take a few minutes in some cases), then run the installer
-(on Windows) or just copy over `/Applications/Bitcoin-Qt` (on macOS) or
-`bitcoind`/`bitcoin-qt` (on Linux).
+- New wallets use descriptors and SQLite.
+- Descriptor-derived private keys are supported by BTCW staking.
+- Berkeley DB is not required for normal wallet use or mining. Remaining BDB
+  support is intended for migration of old wallets.
+- Mining rewards return to the public key belonging to the selected staking
+  output.
 
-Upgrading directly from a version of Bitcoin Core that has reached its EOL is
-possible, but it might take some time if the data directory needs to be
-migrated. Old wallet versions of Bitcoin Core are generally supported.
+Back up the wallet and its recovery information before transferring funds or
+upgrading. Test new releases with small amounts first.
+
+Chain and network changes
+=========================
+
+- BTCW mainnet and testnet network identifiers, ports, address prefixes, and
+  DNS seeds are retained.
+- BTCW genesis blocks and historical checkpoints are retained.
+- Mainnet history is replayed from genesis and checked against the mandatory
+  historical anchor at height 141410.
+- AssumeUTXO snapshots are not provided in this release.
+- Mainnet is the supported public network; regtest remains available for
+  development.
+
+See [`checkpoint-history.md`](checkpoint-history.md) for historical replay,
+checkpoint, and activation details.
+
+Upgrading
+=========
+
+1. Stop mining and shut down the old node cleanly.
+2. Wait for the process to exit completely.
+3. Back up the wallet and data directory.
+4. Install the new `bitcoind`, `bitcoin-qt`, and `bitcoin-cli` binaries.
+5. Start the node with the existing BTCW data directory and allow verification
+   and synchronization to finish.
+6. Start the external GPU worker, unlock the wallet if necessary, and enable
+   staking again. Staking does not resume automatically after restart.
+
+Do not run two node versions against the same data directory at the same time.
+Do not copy Bitcoin Core chainstate or wallet files into the BTCW data
+directory.
+
+Security notes
+==============
+
+The shared-memory mining interface contains sensitive private-key material
+while a mining attempt is active. Run the node and trusted GPU worker under a
+dedicated operating-system account. Do not give untrusted processes access to
+that account or `/dev/shm/shared_mem`.
+
+Consensus and wallet code is security-sensitive. Successful builds and local
+tests are not substitutes for independent review. The limits of the current
+signature-work design are described in
+[`signature-reuse-audit.md`](signature-reuse-audit.md).
 
 Compatibility
-==============
+=============
 
-Bitcoin Core is supported and tested on the following operating systems or
-newer: Linux Kernel 3.17, macOS 14, and Windows 10 (version 1903). Bitcoin Core
-should also work on most other Unix-like systems but is not as frequently tested
-on them. It is not recommended to use Bitcoin Core on unsupported systems.
-
-Notable changes
-===============
-
-- BIP 9 bits 5 to 28 inclusive are now ignored for soft fork signaling, as per
-  BIP 323. We won't warn about unknown deployments when receiving blocks that
-  set any of those bits in their version. (#34779)
-
-- The private-broadcast queue (transactions submitted via `sendrawtransaction`
-  when `-privatebroadcast` is enabled and not yet echoed back from the network)
-  is now capped at 10,000 entries. When full, new submissions are rejected. It is
-  up to the caller to inspect the queue via `getprivatebroadcastinfo` and free
-  up space when stuck via `abortprivatebroadcast`. (#35406)
-
-### Versionbits
-
-- #34779 BIP 323: reserve version bits 5-28 as extra nonce space
-
-### Validation
-
-- #35209 validation: correct lifetime of precomputed tx data
-- #35465 coins: compact chainstate regularly
-
-### Leveldb
-
-- #61(bitcoin-core/leveldb): Disable seek compaction
-
-### P2P
-
-- #34873 net: fix premature stale flagging of unpicked private broadcast txs
-- #35406 private broadcast: limit outstanding txs to count of 10,000
-- #35678 private broadcast: define and use new RPC_LIMIT_EXCEEDED error code
-- #35691 chainparams: delete my DNS seed
-- #35766 p2p: Assume v2transport for addresses from seeds
-
-### Net
-
-- #36199 net: treat RFC 9637 new IPv6 documentation range as invalid
-- #36201 Update embedded asmap to 1788801420
-
-### Test
-
-- #35914 test, fuzz: Remove unused variables
-- #35937 test: Append print_suppressions=0 to LSAN_OPTIONS, and suppress bitcoin-qt
-- #36045 test: avoid undersized Boost.Test signal stacks
-
-### Fuzz
-
-- #35679 fuzz: Remove unused DeserializeFromFuzzingInput params overload
-
-### Build
-
-- #35769 depends, zeromq: Apply upstream patch
-- #36218 build: avoid pipe2 on Darwin (for now)
-
-### Doc
-
-- #35908 doc: Update NetBSD Build Guide
-- #35928 doc: mention -DWITH_ZMQ=ON in macOS build guide
-
-### Misc
-
-- #35978 contrib/init: fix unused variables in openrc script
+BitcoinPoW Core 31.x is based on Bitcoin Core 31.x and uses its supported build
+systems and platform libraries. Consult the platform-specific instructions in
+`doc/build-unix.md`, `doc/build-windows.md`, and `doc/build-osx.md` before
+building from source.
 
 Credits
 =======
 
-Thanks to everyone who directly contributed to this release:
-
-- ajtowns
-- cyb3ralbert
-- darosior
-- fanquake
-- fjahr
-- Greg Sanders
-- hebasto
-- hodlinator
-- jpk68
-- Lőrinc
-- Martin Zumsande
-- Mccalabrese
-- sipa
-- stickies-v
-
-As well as to everyone that helped with translations on
-[Transifex](https://explore.transifex.com/bitcoin/bitcoin/).
+BitcoinPoW Core includes work from the BitcoinPoW contributors and the Bitcoin
+Core project. It is distributed under the MIT License; see `COPYING`.

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <limits>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace Consensus {
@@ -81,7 +82,16 @@ struct BIP9Deployment {
 /**
  * Parameters that influence chain consensus.
  */
+/** Trusted header anchor for replaying history without retired mining proofs. */
+struct HistoricalCheckpoint {
+    int height;
+    uint256 hash;
+};
+
 struct Params {
+    std::optional<HistoricalCheckpoint> historical_checkpoint;
+    std::map<int, uint256> historical_checkpoints;
+
     uint256 hashGenesisBlock;
     int nSubsidyHalvingInterval;
     /**
@@ -107,7 +117,7 @@ struct Params {
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and segwit activations. */
     int MinBIP9WarningHeight;
-    std::array<BIP9Deployment,MAX_VERSION_BITS_DEPLOYMENTS> vDeployments;
+    std::array<BIP9Deployment, MAX_VERSION_BITS_DEPLOYMENTS> vDeployments;
     /** Proof of work parameters */
     uint256 powLimit;
     bool fPowAllowMinDifficultyBlocks;
@@ -128,6 +138,10 @@ struct Params {
     uint256 nMinimumChainWork;
     /** By default assume that the signatures in ancestors of this block are valid */
     uint256 defaultAssumeValid;
+    /** Proof of stake parameters */
+    uint256 posLimit{};
+    int nLastPOWBlock{std::numeric_limits<int>::max()};
+    int nEnableHeaderSignatureHeight{0};
 
     /**
      * If true, witness commitments contain a payload equal to a Bitcoin Script solution

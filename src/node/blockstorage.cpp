@@ -17,6 +17,7 @@
 #include <kernel/notifications_interface.h>
 #include <kernel/types.h>
 #include <pow.h>
+#include <pos.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -60,6 +61,7 @@ static constexpr uint8_t DB_BLOCK_INDEX{'b'};
 static constexpr uint8_t DB_FLAG{'F'};
 static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
+static constexpr uint8_t DB_STAKE_INDEX{'s'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -144,8 +146,13 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
                 pindexNew->nNonce         = diskindex.nNonce;
                 pindexNew->nStatus        = diskindex.nStatus;
                 pindexNew->nTx            = diskindex.nTx;
+                pindexNew->prevoutStake   = diskindex.prevoutStake;
+                pindexNew->vchBlockSig    = diskindex.vchBlockSig;
+                pindexNew->nStakeModifier = diskindex.nStakeModifier;
+                pindexNew->hashProof      = diskindex.hashProof;
+                pindexNew->nMoneySupply   = diskindex.nMoneySupply;
 
-                if (!CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
+                if (pindexNew->IsProofOfWork() && !CheckProofOfWork(pindexNew->GetBlockHash(), pindexNew->nBits, consensusParams)) {
                     LogError("%s: CheckProofOfWork failed: %s\n", __func__, pindexNew->ToString());
                     return false;
                 }
@@ -160,6 +167,32 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
         }
     }
 
+    return true;
+}
+
+bool BlockTreeDB::WriteStakeIndex(unsigned int height, uint160 address)
+{
+    Write(std::make_pair(DB_STAKE_INDEX, height), address);
+    return true;
+}
+
+bool BlockTreeDB::ReadStakeIndex(unsigned int height, uint160& address)
+{
+    return Read(std::make_pair(DB_STAKE_INDEX, height), address);
+}
+
+bool BlockTreeDB::ReadStakeIndex(unsigned int high, unsigned int low, std::vector<uint160>& addresses)
+{
+    for (unsigned int height = low; height < high; ++height) {
+        uint160 address;
+        if (ReadStakeIndex(height, address)) addresses.push_back(address);
+    }
+    return true;
+}
+
+bool BlockTreeDB::EraseStakeIndex(unsigned int height)
+{
+    Erase(std::make_pair(DB_STAKE_INDEX, height));
     return true;
 }
 
@@ -245,6 +278,8 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    pindexNew->nStakeModifier = ComputeStakeModifier(
+        pindexNew->pprev, block.IsProofOfWork() ? block.GetHash() : block.prevoutStake.hash.ToUint256());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
     if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
         best_header = pindexNew;
@@ -1054,7 +1089,7 @@ bool BlockManager::ReadBlock(CBlock& block, const FlatFilePos& pos, const std::o
     const auto block_hash{block.GetHash()};
 
     // Check the header
-    if (!CheckProofOfWork(block_hash, block.nBits, GetConsensus())) {
+    if (block.IsProofOfWork() && !CheckProofOfWork(block_hash, block.nBits, GetConsensus())) {
         LogError("Errors in block header at %s while reading block", pos.ToString());
         return false;
     }

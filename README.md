@@ -1,79 +1,144 @@
-Bitcoin Core integration/staging tree
-=====================================
+# Bitcoin PoW (BTCW)
 
-https://bitcoincore.org
+Bitcoin PoW is a cryptocurrency with its own chain and wallet. BTCW blocks after the early proof-of-work period use a coin owned by the miner and a signature-based work search. The miner creates a coinstake transaction using an eligible unspent transaction output (UTXO), then searches for a block signature whose hash meets the network target.
 
-For an immediately usable, binary version of the Bitcoin Core software, see
-https://bitcoincore.org/en/download/.
+BTCW aims to make mining practical for people running their own wallets and to make conventional pool arrangements harder. Its rules tie mining to a coin owner, but they do **not** guarantee that pools cannot exist or that every mining attempt has the same computational cost.
 
-What is Bitcoin Core?
----------------------
+This repository is the BTCW node and wallet. It is based on Bitcoin Core 31.x,
+but it operates the BTCW network and implements BTCW-specific block,
+proof-of-stake, mining, difficulty, and historical-validation rules. Do not use
+Bitcoin chain data or Bitcoin network parameters with it.
 
-Bitcoin Core connects to the Bitcoin peer-to-peer network to download and fully
-validate blocks and transactions. It also includes a wallet and graphical user
-interface, which can be optionally built.
+## Important wallet and mining notes
 
-Further information about Bitcoin Core is available in the [doc folder](/doc).
+- New wallets are descriptor wallets stored in SQLite. Berkeley DB is not
+  required for normal operation or mining; remaining BDB support is read-only
+  and exists to migrate old wallets.
+- Back up the wallet and recovery information before funding it. Losing the
+  wallet's private keys also loses control of its BTCW.
+- Mining currently requires an eligible P2PK or legacy P2PKH output. Default
+  Bech32, wrapped SegWit, and Taproot outputs are not selected by Stage 1.
+- A mining output must be spendable by the local wallet and have at least six
+  confirmations. Watch-only and external-signer wallets cannot mine locally.
+- Stage 2 requires the separate BTCW GPU worker. The node exchanges work with
+  it through the `/shared_mem` POSIX shared-memory interface.
+- The shared-memory mining interface contains sensitive private-key material
+  while an attempt is active. Run the node and trusted GPU worker under a
+  dedicated operating-system account, do not grant other users access, and do
+  not run untrusted software as that account.
+- Mining rewards return to the public key of the selected staking coin. The
+  reward destination cannot currently be redirected to another address.
 
-License
--------
+## How mining works
 
-Bitcoin Core is released under the terms of the MIT license. See [COPYING](COPYING) for more
-information or see https://opensource.org/license/MIT.
+1. **Choose an eligible coin.** The wallet selects a mature UTXO it can spend and creates a coinstake transaction. The current kernel check does not give larger UTXOs more mining weight; owning more eligible UTXOs can provide more choices of mining input.
+2. **Search for work.** The miner signs the unsigned block header, varying the internal ECDSA signing nonce between attempts. It hashes the DER signature and repeats until that hash is at or below the target set by the block difficulty.
+3. **Verify the block.** Nodes check the coinstake spend, the relationship between the stake coin and the mining key, the block signature, the work target, and the block's other consensus rules.
 
-Development Process
--------------------
+The early chain used ordinary proof of work. Current mining combines UTXO ownership with a signature-based proof-of-work search. “Proof of Transactions” appears in older descriptions of BTCW, but there is no separate transaction-count mining stage in the current rules.
 
-The `master` branch is regularly built (see `doc/build-*.md` for instructions) and tested, but it is not guaranteed to be
-completely stable. [Tags](https://github.com/bitcoin/bitcoin/tags) are created
-regularly from release branches to indicate new official, stable release versions of Bitcoin Core.
+## Rules from block 144444
 
-The https://github.com/bitcoin-core/gui repository is used exclusively for the
-development of the GUI. Its master branch is identical in all monotree
-repositories. Release branches and tags do not exist, so please do not fork
-that repository unless it is for development reasons.
+The rules activated at height **144444** require canonical, low-S block signatures without an external mining nonce and switch difficulty adjustment to ASERT. They also require every positive coinstake output to pay the same public key used for block signing. This includes the returned stake and the claimed block reward; a miner cannot put a positive coinstake payout directly into another key's output.
 
-The contribution workflow is described in [CONTRIBUTING.md](CONTRIBUTING.md)
-and useful hints for developers can be found in [doc/developer-notes.md](doc/developer-notes.md).
+These are consensus rules: nodes reject blocks that break them. They do not control payments a miner makes later, nor do they prove that a miner cannot arrange to share work with others. Reusing private ECDSA signing state can also reduce the work needed for repeated mining trials. See the [signature reuse audit](doc/signature-reuse-audit.md) for the details and limits of that finding.
 
-Testing
--------
+## Getting started
 
-Testing and code review is the bottleneck for development; we get more pull
-requests than we can review and test on short notice. Please be patient and help out by testing
-other people's pull requests, and remember this is a security-critical project where any mistake might cost people
-lots of money.
+- Download a release from the [Bitcoin PoW releases page](https://btcw.space/download),
+  or [build from source](doc/build-unix.md). Build notes for
+  [Windows](doc/build-windows.md), [macOS](doc/build-osx.md), and other systems
+  are in [`doc/`](doc/).
+- Run BitcoinPoW Core and allow it to synchronize fully before sending funds or
+  mining.
+- Read [MINING.md](MINING.md) before preparing a mining wallet or starting the
+  GPU worker.
 
-### Automated Testing
+### Build BitcoinPoW Core Qt on Ubuntu/Pop!_OS
 
-Developers are strongly encouraged to write [unit tests](src/test/README.md) for new code, and to
-submit new unit tests for old code. Unit tests can be compiled and run
-(assuming they weren't disabled during the generation of the build system) with: `ctest`. Further details on running
-and extending unit tests can be found in [/src/test/README.md](/src/test/README.md).
+Install the dependencies listed in [the Unix build guide](doc/build-unix.md),
+then run these commands from the repository root—not from `src/`:
 
-There are also [regression and integration tests](/test), written
-in Python.
-These tests can be run (if the [test dependencies](/test) are installed) with: `build/test/functional/test_runner.py`
-(assuming `build` is your build directory).
+```bash
+cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBUILD_GUI=ON \
+    -DENABLE_WALLET=ON \
+    -DENABLE_IPC=OFF \
+    -DBUILD_TESTS=OFF \
+    -DBUILD_BENCH=OFF
+cmake --build build --target bitcoin-qt -j"$(nproc)"
+./build/bin/bitcoin-qt
+```
 
-The CI (Continuous Integration) systems make sure that every pull request is tested on Windows, Linux, and macOS.
-The CI must pass on all commits before merge to avoid unrelated CI failures on new pull requests.
+`ENABLE_IPC=OFF` disables Bitcoin Core's optional Cap'n Proto multiprocess
+interface. It does not disable BTCW wallet mining or the GPU shared-memory
+interface.
 
-### Manual Quality Assurance (QA) Testing
+#### Running Qt on Pop!_OS
 
-Changes should be tested by somebody other than the developer who wrote the
-code. This is especially important for large or high-risk changes. It is useful
-to add a test plan to the pull request description if testing the changes is
-not straightforward.
+Some Pop!_OS installations using the distribution's Qt 6.4.2 libraries can
+crash in Qt's accessibility/DBus integration. If `bitcoin-qt` exits with a
+segmentation fault in `libQt6Gui` or `libQt6DBus`, run it with those desktop
+integrations disabled:
 
-Translations
-------------
+```bash
+QT_IM_MODULE=compose \
+QT_QPA_PLATFORMTHEME=none \
+QT_QPA_PLATFORM=xcb \
+QT_ACCESSIBILITY=0 \
+DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/btcw-no-dbus \
+./build/bin/bitcoin-qt
+```
 
-Changes to translations as well as new translations can be submitted to
-[Bitcoin Core's Transifex page](https://explore.transifex.com/bitcoin/bitcoin/).
+The nonexistent DBus socket is intentional. This workaround disables desktop
+notifications, system-tray integration, accessibility services, and other
+DBus desktop features for this process. It does not disable the BTCW node,
+wallet, synchronization, or mining. Building against a newer Qt release is the
+preferred long-term solution.
 
-Translations are periodically pulled from Transifex and merged into the git repository. See the
-[translation process](doc/translation_process.md) for details on how this works.
+### Start continuous mining
 
-**Important**: We do not accept translation changes as GitHub pull requests because the next
-pull from Transifex would automatically overwrite them again.
+After preparing an eligible wallet and starting the GPU worker, use the Qt
+Debug Console:
+
+```text
+setstaking true 30
+getstakinginfo
+```
+
+The timeout defaults to 30 seconds, so `setstaking true` and
+`setstaking true 30` are equivalent. The recommended value is 30 seconds.
+Avoid unnecessarily large values: the node may keep the same mining attempt
+open after the chain tip or candidate block has changed, causing the GPU to
+repeat work that is no longer useful before the next attempt is prepared.
+
+Stop mining with:
+
+```text
+setstaking false
+```
+
+The same RPCs are available through `bitcoin-cli`. Continuous mining stops
+when the wallet unloads or the application shuts down and must be enabled again
+after a restart. See [MINING.md](MINING.md) for the complete procedure.
+
+Mainnet is the supported public network in this codebase. Regtest is available for development. See [historical replay and activation notes](doc/checkpoint-history.md) for checkpoint, sync, and difficulty details.
+
+## Project resources
+
+- [Source code](https://github.com/bitcoin-pow/BitcoinPoW)
+- [Release notes](doc/release-notes.md)
+- [Issue tracker](https://github.com/bitcoin-pow/BitcoinPoW/issues)
+- [Project website](https://btcw.space)
+- [Telegram](https://t.me/BitcoinPoWPoT)
+
+## Safety and development status
+
+Consensus and wallet software is security-sensitive. Test new builds with a
+separate data directory and small amounts before relying on them. Keep offline
+backups, verify downloaded releases, and never expose RPC credentials or wallet
+passphrases. Source availability and successful local tests are not substitutes
+for independent review of consensus-critical changes.
+
+BitcoinPoW Core is distributed under the MIT License. See [COPYING](COPYING).

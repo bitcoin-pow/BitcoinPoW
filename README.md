@@ -29,6 +29,38 @@ Bitcoin chain data or Bitcoin network parameters with it.
 - Mining rewards return to the public key of the selected staking coin. The
   reward destination cannot currently be redirected to another address.
 
+## Migrating a legacy BTCW wallet
+
+Legacy Berkeley DB (`wallet.dat`) wallets must be migrated before they can be
+loaded normally in this release. The `migratewallet` RPC converts them to
+SQLite descriptor wallets, retaining their keys and addresses.
+
+1. Shut down the old wallet application cleanly and keep an untouched backup.
+2. To import a wallet from another installation, create a new directory such
+   as `oldwallet` inside the node's wallet directory and place a copy of the
+   legacy file at `<walletdir>/oldwallet/wallet.dat`. Do not overwrite an
+   existing wallet. A wallet already in the wallet directory can be migrated
+   under its existing name; `listwalletdir` lists the available names.
+3. Start the new node and migrate the wallet without loading it first:
+
+   ```bash
+   bitcoin-cli -rpcclienttimeout=0 migratewallet "oldwallet"
+   ```
+
+   Encrypted wallets require their passphrase as the second RPC argument.
+   To avoid putting it in shell history, use
+   `bitcoin-cli -rpcclienttimeout=0 -stdin migratewallet "oldwallet"`, enter
+   the passphrase on standard input, then end input (Ctrl-D on Unix).
+4. Check the migrated wallet's balance, addresses, and transaction history,
+   and make a new backup of each resulting wallet before using it.
+
+Migration creates a `<wallet name>-<timestamp>.legacy.bak` backup and returns
+its location as `backup_path`. Watch-only and other solvable scripts may be
+placed in separate wallets named in the RPC result. Keep the original backup
+and test migration with a copy: unusual legacy scripts may need additional
+attention. See the [release notes](doc/release-notes.md#migrating-legacy-berkeley-db-wallets)
+for details.
+
 ## How mining works
 
 1. **Choose an eligible coin.** The wallet selects a mature UTXO it can spend and creates a coinstake transaction. The current kernel check does not give larger UTXOs more mining weight; owning more eligible UTXOs can provide more choices of mining input.

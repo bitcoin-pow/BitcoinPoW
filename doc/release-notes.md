@@ -79,6 +79,56 @@ Wallet changes
 Back up the wallet and its recovery information before transferring funds or
 upgrading. Test new releases with small amounts first.
 
+### Migrating legacy Berkeley DB wallets
+
+Legacy BTCW Berkeley DB (`wallet.dat`) wallets cannot be loaded for normal use
+until they are migrated. Use `migratewallet` to convert them to SQLite
+descriptor wallets. A Berkeley DB installation is not required: the node has
+read-only support for reading legacy wallets during migration.
+
+1. Shut down the old application cleanly and preserve an untouched wallet
+   backup. Test migration using a copy.
+2. If importing from another installation, create a new directory in the
+   node's wallet directory and copy the legacy file into it, for example
+   `<walletdir>/oldwallet/wallet.dat`. Do not overwrite another wallet.
+   Wallets already present can be migrated under their existing names.
+   Use `listwalletdir` to find those names.
+3. Start the new node. Do not try to load the legacy wallet first. Run:
+
+   ```bash
+   bitcoin-cli -rpcclienttimeout=0 migratewallet "oldwallet"
+   ```
+
+   Migration can take a long time; `-rpcclienttimeout=0` disables the CLI
+   timeout. For encrypted wallets, the second RPC argument is the wallet
+   passphrase. Use standard input to avoid putting it in shell history:
+
+   ```bash
+   bitcoin-cli -rpcclienttimeout=0 -stdin migratewallet "oldwallet"
+   ```
+
+   Enter the passphrase, followed by end-of-input (Ctrl-D on Unix). The RPC
+   syntax is `migratewallet "wallet_name" "passphrase"`; omit the passphrase
+   for an unencrypted wallet. If using a wallet-specific RPC endpoint, its
+   wallet name must match the name being migrated.
+4. Verify balances, addresses, and transaction history, then create a new
+   backup of every resulting wallet. Retain the original legacy backup.
+
+The migration creates a `<wallet name>-<timestamp>.legacy.bak` backup in the
+wallet directory and returns its path in `backup_path`. A wallet containing
+private keys retains its name. Watch-only scripts and other solvable scripts
+may be separated into `_watchonly` and `_solvables` wallets; check the returned
+`wallet_name`, `watchonly_name`, and `solvables_name` fields. A purely watch-only
+wallet may produce only the watch-only wallet.
+
+Migration preserves existing keys and addresses, but newly generated addresses
+use descriptor derivation rules. The migration code supports legacy wallets;
+compatibility with every historical BTCW wallet and unusual script combination
+has not been verified. If anything is missing or migration fails, keep the
+original backup and report the problem before using the converted wallet.
+See [wallet management](managing-wallets.md) for more migration and recovery
+information.
+
 Chain and network changes
 =========================
 
@@ -103,7 +153,9 @@ Upgrading
 4. Install the new `bitcoind`, `bitcoin-qt`, and `bitcoin-cli` binaries.
 5. Start the node with the existing BTCW data directory and allow verification
    and synchronization to finish.
-6. Start the external GPU worker, unlock the wallet if necessary, and enable
+6. If using a legacy Berkeley DB wallet, follow the migration instructions
+   above and verify the converted wallet before resuming use.
+7. Start the external GPU worker, unlock the wallet if necessary, and enable
    staking again. Staking does not resume automatically after restart.
 
 Do not run two node versions against the same data directory at the same time.

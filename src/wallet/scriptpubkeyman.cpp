@@ -19,6 +19,7 @@
 #include <util/translation.h>
 #include <wallet/scriptpubkeyman.h>
 
+#include <algorithm>
 #include <optional>
 
 using common::PSBTError;
@@ -989,6 +990,23 @@ std::optional<CKey> DescriptorScriptPubKeyMan::GetKey(const CKeyID& keyid) const
     return it->second;
 }
 
+// BTCW coinstake returns legacy P2PKH stakes to the same key as P2PK.
+// Track these scripts alongside the descriptor outputs, including on reload,
+// so rewards remain discoverable and use the same signing-provider index.
+static void AddCoinStakeScripts(std::vector<CScript>& scripts, const FlatSigningProvider& provider)
+{
+    std::vector<CScript> payouts;
+    for (const CScript& script : scripts) {
+        std::vector<std::vector<unsigned char>> solutions;
+        if (Solver(script, solutions) != TxoutType::PUBKEYHASH) continue;
+        CPubKey pubkey;
+        if (!provider.GetPubKey(CKeyID{uint160{solutions[0]}}, pubkey)) continue;
+        const CScript payout = GetScriptForRawPubKey(pubkey);
+        if (std::find(scripts.begin(), scripts.end(), payout) == scripts.end()) payouts.push_back(payout);
+    }
+    scripts.insert(scripts.end(), payouts.begin(), payouts.end());
+}
+
 bool DescriptorScriptPubKeyMan::TopUp(unsigned int size)
 {
     WalletBatch batch(m_storage.GetDatabase());
@@ -1031,6 +1049,7 @@ bool DescriptorScriptPubKeyMan::TopUpWithDB(WalletBatch& batch, unsigned int siz
         if (!m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
             if (!m_wallet_descriptor.descriptor->Expand(i, provider, scripts_temp, out_keys, &temp_cache)) return false;
         }
+        AddCoinStakeScripts(scripts_temp, out_keys);
         // Add all of the scriptPubKeys to the scriptPubKey set
         new_spks.insert(scripts_temp.begin(), scripts_temp.end());
         for (const CScript& script : scripts_temp) {
@@ -1437,6 +1456,7 @@ void DescriptorScriptPubKeyMan::SetCache(const DescriptorCache& cache)
         if (!m_wallet_descriptor.descriptor->ExpandFromCache(i, m_wallet_descriptor.cache, scripts_temp, out_keys)) {
             throw std::runtime_error("Error: Unable to expand wallet descriptor from cache");
         }
+        AddCoinStakeScripts(scripts_temp, out_keys);
         // Add all of the scriptPubKeys to the scriptPubKey set
         new_spks.insert(scripts_temp.begin(), scripts_temp.end());
         for (const CScript& script : scripts_temp) {

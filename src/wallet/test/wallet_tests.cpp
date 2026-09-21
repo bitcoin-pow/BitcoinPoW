@@ -86,6 +86,93 @@ BOOST_AUTO_TEST_CASE(coinstake_reward_returns_to_staking_key)
     BOOST_CHECK(payout.scriptPubKey != GetScriptForRawPubKey(unrelated_key.GetPubKey()));
 }
 
+BOOST_AUTO_TEST_CASE(pkh_descriptor_recognizes_and_spends_coinstake)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    const CKey key{GenerateRandomKey()};
+    FlatSigningProvider provider;
+    std::string error;
+    auto descriptors = Parse("pkh(" + EncodeSecret(key) + ")", provider, error, false);
+    BOOST_REQUIRE_EQUAL(descriptors.size(), 1U);
+    WalletDescriptor descriptor(std::move(descriptors[0]), 0, 0, 1, 0);
+    auto manager_result = wallet.AddWalletDescriptor(descriptor, provider, "", false);
+    BOOST_REQUIRE(manager_result);
+    auto& manager = manager_result->get();
+
+    const CAmount principal{25 * COIN};
+    const CTxOut payout = CreateCoinStakeOutput(principal, 12345, 2 * COIN, key.GetPubKey());
+    BOOST_CHECK(wallet.IsMine(payout));
+    BOOST_CHECK(!wallet.IsMine(GetScriptForRawPubKey(GenerateRandomKey().GetPubKey())));
+    auto solving = wallet.GetSolvingProvider(payout.scriptPubKey);
+    BOOST_REQUIRE(solving);
+    BOOST_CHECK(IsSolvable(*solving, payout.scriptPubKey));
+
+    // An already-recorded stake must return both principal and reward to the
+    // wallet, and become eligible again after six confirmations.
+    const uint256 block_hash = m_node.chainman->ActiveChain().Tip()->GetBlockHash();
+    wallet.SetLastBlockProcessed(100, block_hash);
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{1}), 0});
+    funding.vout.emplace_back(principal, GetScriptForDestination(PKHash(key.GetPubKey())));
+    wallet.AddToWallet(MakeTransactionRef(funding), TxStateConfirmed{block_hash, 90, 1});
+    CMutableTransaction stake;
+    stake.vin.emplace_back(COutPoint{funding.GetHash(), 0});
+    stake.vout.emplace_back();
+    stake.vout[0].SetEmpty();
+    stake.vout.push_back(payout);
+    auto* wtx = wallet.AddToWallet(MakeTransactionRef(stake), TxStateConfirmed{block_hash, 96, 1});
+    BOOST_REQUIRE(wtx);
+    BOOST_CHECK_EQUAL(CachedTxGetCredit(wallet, *wtx, false) - CachedTxGetDebit(wallet, *wtx, false), 2 * COIN + 12345);
+    BOOST_CHECK_EQUAL(wallet.GetStakeWeight(), 0U);
+    wallet.SetLastBlockProcessed(101, block_hash);
+    BOOST_CHECK_EQUAL(wallet.GetStakeWeight(), payout.nValue);
+
+    CMutableTransaction spend;
+    const COutPoint outpoint{stake.GetHash(), 1};
+    spend.vin.emplace_back(outpoint);
+    spend.vout.emplace_back(payout.nValue - 1000, GetScriptForDestination(PKHash(key.GetPubKey())));
+    std::map<COutPoint, Coin> coins{{outpoint, Coin{payout, 96, false, true}}};
+    std::map<int, bilingual_str> errors;
+    BOOST_CHECK(wallet.SignTransaction(spend, coins, SIGHASH_ALL, errors));
+    BOOST_CHECK(errors.empty());
+
+    // Reconstructing from the persisted public cache must also discover old
+    // payouts, even without private keys loaded (e.g. a locked wallet).
+    LOCK(manager.cs_desc_man);
+    auto cached_descriptor = manager.GetWalletDescriptor();
+    CWallet reloaded(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    LOCK(reloaded.cs_wallet);
+    DescriptorScriptPubKeyMan cached_manager(reloaded, cached_descriptor, 1);
+    cached_manager.SetCache(cached_descriptor.cache);
+    BOOST_CHECK(reloaded.IsMine(payout));
+    auto cached_solving = reloaded.GetSolvingProvider(payout.scriptPubKey);
+    BOOST_REQUIRE(cached_solving);
+    BOOST_CHECK(IsSolvable(*cached_solving, payout.scriptPubKey));
+}
+
+BOOST_AUTO_TEST_CASE(coinstake_script_descriptor_scope)
+{
+    const CKey key{GenerateRandomKey()};
+    const std::string secret = EncodeSecret(key);
+    for (const auto& [expression, owns_payout] : std::vector<std::pair<std::string, bool>>{
+             {"wpkh(" + secret + ")", false},
+             {"sh(wpkh(" + secret + "))", false},
+             {"combo(" + secret + ")", true}}) {
+        CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+        LOCK(wallet.cs_wallet);
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        FlatSigningProvider provider;
+        std::string error;
+        auto descriptors = Parse(expression, provider, error, false);
+        BOOST_REQUIRE_EQUAL(descriptors.size(), 1U);
+        WalletDescriptor descriptor(std::move(descriptors[0]), 0, 0, 1, 0);
+        BOOST_REQUIRE(wallet.AddWalletDescriptor(descriptor, provider, "", false));
+        BOOST_CHECK_EQUAL(wallet.IsMine(GetScriptForRawPubKey(key.GetPubKey())), owns_payout);
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(update_non_range_descriptor, TestingSetup)
 {
     CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());

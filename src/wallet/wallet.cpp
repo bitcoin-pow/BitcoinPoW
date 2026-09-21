@@ -4827,7 +4827,9 @@ std::optional<uint256> CWallet::MineStakeBlock(ChainstateManager& chainman, cons
 
     auto mined{std::make_shared<const CBlock>(std::move(block))};
     bool is_new{false};
-    if (!chainman.ProcessNewBlock(mined, true, false, &is_new) || !is_new) return std::nullopt;
+    // Locally mined blocks do not need the peer header anti-DoS work check,
+    // just like generateblock and submitblock. Full block validation still runs.
+    if (!chainman.ProcessNewBlock(mined, /*force_processing=*/true, /*min_pow_checked=*/true, &is_new) || !is_new) return std::nullopt;
     return mined->GetHash();
 }
 

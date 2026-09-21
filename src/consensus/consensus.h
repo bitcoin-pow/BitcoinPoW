@@ -24,9 +24,9 @@ static constexpr int NO_EXT_WORK_ACTIVATION_HEIGHT = 144444;
 /** One-time target increase at activation, retained in the ASERT reference. */
 static constexpr uint64_t ASERT_ACTIVATION_TARGET_MULTIPLIER = 10000;
 /** Number of fork blocks using the eased historical reference. */
-static constexpr int ASERT_TRANSITION_BLOCKS = 144;
-/** ASERT response time: twelve hours ahead/behind schedule doubles/halves difficulty. */
-static constexpr int64_t ASERT_HALF_LIFE = 12 * 60 * 60;
+static constexpr int ASERT_TRANSITION_BLOCKS = 18;
+/** ASERT response time: three hours ahead/behind schedule doubles/halves difficulty. */
+static constexpr int64_t ASERT_HALF_LIFE = 3 * 60 * 60;
 /** Historical display adjustment between signature work and legacy PoW work. */
 static constexpr uint64_t SIG_DIFF_ADJ = 10000000;
 /** Coinbase transaction outputs can only be spent after this number of new blocks (network rule) */

@@ -322,7 +322,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         // Start the new schedule at the anchor itself. The activation target
         // is exactly the eased reference (subject to compact rounding/capping),
         // regardless of how long the final pre-fork block took to mine.
-        // After 144 fork blocks, use the achieved target at the new anchor
+        // After the transition blocks, use the achieved target at the new anchor
         // without a multiplier. The handoff preserves that target exactly.
         return CalculateASERTTarget(reference_target, params.nPowTargetSpacing,
             pindexLast->GetBlockTime() - anchor->GetBlockTime() + params.nPowTargetSpacing,

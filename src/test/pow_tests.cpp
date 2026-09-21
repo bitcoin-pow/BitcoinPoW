@@ -293,7 +293,7 @@ BOOST_AUTO_TEST_CASE(asert_transition_reference_expires)
     const int anchor = ASERT_TRANSITION_BLOCKS;
     BOOST_CHECK_EQUAL(blocks[1].nBits, 0x1c271000U);
     BOOST_CHECK(blocks[anchor].nBits != blocks[1].nBits);
-    BOOST_CHECK_EQUAL(blocks[anchor + 1].nHeight, 144588);
+    BOOST_CHECK_EQUAL(blocks[anchor + 1].nHeight, NO_EXT_WORK_ACTIVATION_HEIGHT + ASERT_TRANSITION_BLOCKS);
     BOOST_CHECK_EQUAL(blocks[anchor + 1].nBits, blocks[anchor].nBits);
     const auto settled = GetNextWorkRequired(&blocks[anchor + 1], &candidate, params);
     BOOST_CHECK(settled < blocks[anchor].nBits);

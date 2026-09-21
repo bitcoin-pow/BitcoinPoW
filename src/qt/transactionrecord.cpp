@@ -46,7 +46,14 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
             }
         }
         if (credit > 0 || nDebit > 0) {
-            TransactionRecord record(hash, nTime, TransactionRecord::Generated, "", -nDebit, credit);
+            CTxDestination destination;
+            ExtractDestination(wtx.tx->vout[output_index].scriptPubKey, destination);
+            if (const auto* pubkey = std::get_if<PubKeyDestination>(&destination)) {
+                // P2PK payouts have no address encoding. Display the legacy
+                // address of the same key so its wallet label can be found.
+                destination = PKHash(pubkey->GetPubKey());
+            }
+            TransactionRecord record(hash, nTime, TransactionRecord::Generated, EncodeDestination(destination), -nDebit, credit);
             record.idx = output_index;
             parts.append(record);
         }

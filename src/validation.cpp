@@ -96,7 +96,10 @@ using node::SnapshotMetadata;
 static ChainstateManager* g_btcw_chainman{nullptr};
 
 static bool CheckFirstCoinstakeOutput(const CBlock& block);
-static bool CheckBlockSignature(const CBlock& block, bool allow_nonce_free = true);
+static bool CheckLegacyBlockSignature(const CBlock& block);
+static bool CheckForkBlockSignature(const CBlock& block);
+static bool CheckBlockSignatureForHeight(const CBlock& block, int height);
+static bool CheckBlockSignatureAnyFormat(const CBlock& block);
 
 /** Time window to wait between writing blocks/block index and chainstate to disk.
  *  Randomize writing time inside the window to prevent a situation where the
@@ -2325,6 +2328,9 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (!trusted_history && block.IsProofOfStake() && block.nNonce != CURRENT_MINING_NONCE) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-mining-algorithm", "retired mining algorithm outside trusted history");
     }
+    if (!trusted_history && !CheckBlockSignatureForHeight(block, pindex->nHeight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "block signature does not match height-activated rules");
+    }
 
 
     if (block.IsProofOfStake() && (pindex->nHeight <= params.GetConsensus().nLastPOWBlock)) {
@@ -4058,26 +4064,56 @@ bool GetBlockPublicKey(const CBlock& block, std::vector<unsigned char>& pubkey)
     return false;
 }
 
-static bool CheckBlockSignature(const CBlock& block, bool allow_nonce_free)
+static bool GetBlockSignatureContext(const CBlock& block, CPubKey& pubkey, arith_uint256& target)
 {
-    if (block.IsProofOfWork()) return block.vchBlockSig.empty();
     if (block.nNonce != CURRENT_MINING_NONCE) return false;
-    std::vector<unsigned char> pubkey;
-    if (!GetBlockPublicKey(block, pubkey) || block.vchBlockSig.size() < 60 || block.vchBlockSig.size() > 84) return false;
-    arith_uint256 target;
+    std::vector<unsigned char> pubkey_bytes;
+    if (!GetBlockPublicKey(block, pubkey_bytes)) return false;
+    pubkey = CPubKey{pubkey_bytes};
     target.SetCompact(block.nBits);
     target *= SIG_DIFF_ADJ;
-    if (allow_nonce_free && IsForkBlockSignatureSize(block.vchBlockSig.size()) &&
-        CPubKey(pubkey).Verify(block.GetHashWithoutSign(), block.vchBlockSig) &&
-        UintToArith256(Hash(block.vchBlockSig)) <= target) return true;
-    if (block.vchBlockSig.size() < 8) return false;
+    return true;
+}
+
+static bool CheckLegacyBlockSignature(const CBlock& block)
+{
+    if (block.IsProofOfWork()) return block.vchBlockSig.empty();
+    if (block.vchBlockSig.size() < 60 || block.vchBlockSig.size() > 84) return false;
+    CPubKey pubkey;
+    arith_uint256 target;
+    if (!GetBlockSignatureContext(block, pubkey, target)) return false;
     const auto nonce_begin = block.vchBlockSig.end() - 8;
     uint64_t nonce{0};
     for (auto it = nonce_begin; it != block.vchBlockSig.end(); ++it) nonce = (nonce << 8) | *it;
     const std::vector<unsigned char> signature(block.vchBlockSig.begin(), nonce_begin);
     const uint256 message = ArithToUint256(UintToArith256(block.GetHashWithoutSign()) + arith_uint256(nonce));
-    if (!CPubKey(pubkey).Verify(message, signature)) return false;
+    if (!pubkey.Verify(message, signature)) return false;
     return UintToArith256((HashWriter{} << nonce << signature).GetHash()) <= target;
+}
+
+static bool CheckForkBlockSignature(const CBlock& block)
+{
+    if (block.IsProofOfWork()) return block.vchBlockSig.empty();
+    if (!IsForkBlockSignatureSize(block.vchBlockSig.size())) return false;
+    std::vector<unsigned char> encoded_signature{block.vchBlockSig};
+    encoded_signature.push_back(SIGHASH_ALL);
+    if (!CheckSignatureEncoding(encoded_signature, SCRIPT_VERIFY_DERSIG | SCRIPT_VERIFY_LOW_S, nullptr)) return false;
+    CPubKey pubkey;
+    arith_uint256 target;
+    if (!GetBlockSignatureContext(block, pubkey, target)) return false;
+    return pubkey.Verify(block.GetHashWithoutSign(), block.vchBlockSig) &&
+           UintToArith256(Hash(block.vchBlockSig)) <= target;
+}
+
+static bool CheckBlockSignatureForHeight(const CBlock& block, int height)
+{
+    return height < NO_EXT_WORK_ACTIVATION_HEIGHT ? CheckLegacyBlockSignature(block) : CheckForkBlockSignature(block);
+}
+
+static bool CheckBlockSignatureAnyFormat(const CBlock& block)
+{
+    if (block.IsProofOfWork()) return block.vchBlockSig.empty();
+    return CheckLegacyBlockSignature(block) || CheckForkBlockSignature(block);
 }
 
 bool ChainstateManager::UpdateHashProof(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensus_params, CBlockIndex* pindex, CCoinsViewCache& view)
@@ -4296,7 +4332,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
     }
 
     // Check proof-of-stake block signature
-    if (fCheckSig && !CheckBlockSignature(block))
+    if (fCheckSig && !CheckBlockSignatureAnyFormat(block))
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "bad proof-of-stake block signature");
 
     // Check transactions
@@ -4483,9 +4519,9 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature-encoding", "non-canonical block signature");
     }
     const auto& checkpoint = chainman.GetConsensus().historical_checkpoint;
-    if (nHeight < NO_EXT_WORK_ACTIVATION_HEIGHT &&
-        (!checkpoint || nHeight > checkpoint->height) && !CheckBlockSignature(block, false)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "bad historical block signature");
+    const bool trusted_history{checkpoint && nHeight <= checkpoint->height};
+    if (!trusted_history && !CheckBlockSignatureForHeight(block, nHeight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-signature", "block signature does not match height-activated rules");
     }
 
     // Enforce BIP113 (Median Time Past).

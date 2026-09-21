@@ -1,0 +1,304 @@
+# Copyright (c) 2026 The Bitcoin PoW Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: Build
+
+on:
+  push:
+    branches:
+      - btcw_31.x
+  workflow_dispatch:
+
+# New group so this workflow is not queued behind the old static-Qt job.
+concurrency:
+  group: build-qtbin-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_NAME: BitcoinPoW
+  CMAKE_FLAGS: >-
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    -DBUILD_GUI=ON
+    -DBUILD_DAEMON=ON
+    -DBUILD_CLI=ON
+    -DBUILD_TX=ON
+    -DBUILD_UTIL=ON
+    -DBUILD_WALLET_TOOL=ON
+    -DENABLE_WALLET=ON
+    -DENABLE_IPC=OFF
+    -DBUILD_TESTS=OFF
+    -DBUILD_BENCH=OFF
+    -DBUILD_FUZZ_BINARY=OFF
+    -DWITH_ZMQ=OFF
+
+jobs:
+  linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkgconf python3 ccache \
+            libevent-dev libboost-dev libsqlite3-dev \
+            qt6-base-dev qt6-tools-dev qt6-l10n-tools qt6-tools-dev-tools \
+            qt6-wayland libgl-dev libqrencode-dev
+
+      - name: Set Ccache directory
+        run: echo "CCACHE_DIR=${RUNNER_TEMP}/ccache_dir" >> "$GITHUB_ENV"
+
+      - name: Restore Ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: linux-x86_64-ccache-${{ github.run_id }}
+          restore-keys: linux-x86_64-ccache-
+
+      - name: Configure
+        run: cmake -S . -B build ${{ env.CMAKE_FLAGS }} -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Package
+        run: |
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          DISTNAME="${{ env.PROJECT_NAME }}-${SHORT_SHA}-x86_64-linux-gnu"
+          mkdir -p "${DISTNAME}/bin"
+          for bin in bitcoind bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet bitcoin-qt; do
+            if [ ! -f "build/bin/${bin}" ]; then
+              echo "ERROR: missing build/bin/${bin}"
+              ls -la build/bin || true
+              exit 1
+            fi
+            strip "build/bin/${bin}" || true
+            cp "build/bin/${bin}" "${DISTNAME}/bin/"
+          done
+          cp README.md COPYING MINING.md "${DISTNAME}/" 2>/dev/null || true
+          tar czf "${DISTNAME}.tar.gz" "${DISTNAME}"
+          sha256sum "${DISTNAME}.tar.gz" > "${DISTNAME}.tar.gz.sha256"
+          echo "DISTNAME=${DISTNAME}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            ${{ env.PROJECT_NAME }}-*-x86_64-linux-gnu.tar.gz
+            ${{ env.PROJECT_NAME }}-*-x86_64-linux-gnu.tar.gz.sha256
+
+      - name: Save Ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: linux-x86_64-ccache-${{ github.run_id }}
+
+  windows-x64:
+    name: Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt 6 (prebuilt, not compiled by vcpkg)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.7.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2019_64
+          archives: 'qtbase qttools'
+          cache: true
+
+      - name: MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache vcpkg wallet deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg-installed
+            C:\vcpkg-bt
+          key: win-vcpkg-wallet-${{ hashFiles('vcpkg.json') }}
+
+      - name: Configure
+        shell: cmd
+        run: |
+          if not defined VCPKG_INSTALLATION_ROOT (
+            echo VCPKG_INSTALLATION_ROOT is not set
+            exit /b 1
+          )
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
+            -DCMAKE_TOOLCHAIN_FILE=%VCPKG_INSTALLATION_ROOT%\scripts\buildsystems\vcpkg.cmake ^
+            -DVCPKG_TARGET_TRIPLET=x64-windows ^
+            -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON ^
+            -DVCPKG_MANIFEST_FEATURES=wallet ^
+            -DVCPKG_INSTALLED_DIR=C:\vcpkg-installed ^
+            -DVCPKG_INSTALL_OPTIONS=--x-buildtrees-root=C:\vcpkg-bt ^
+            -DCMAKE_PREFIX_PATH=%QT_ROOT_DIR% ^
+            -DBUILD_GUI=ON ^
+            -DBUILD_DAEMON=ON ^
+            -DBUILD_CLI=ON ^
+            -DBUILD_TX=ON ^
+            -DBUILD_UTIL=ON ^
+            -DBUILD_WALLET_TOOL=ON ^
+            -DENABLE_WALLET=ON ^
+            -DENABLE_IPC=OFF ^
+            -DBUILD_TESTS=OFF ^
+            -DBUILD_BENCH=OFF ^
+            -DBUILD_FUZZ_BINARY=OFF ^
+            -DWITH_ZMQ=OFF ^
+            -DWITH_QRENCODE=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j %NUMBER_OF_PROCESSORS%
+        shell: cmd
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $short = "${{ github.sha }}".Substring(0, 7)
+          $dist = "${{ env.PROJECT_NAME }}-$short-win64"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          $candidates = @(
+            "build\bin\Release",
+            "build\bin\RelWithDebInfo",
+            "build\bin"
+          )
+          $bins = @("bitcoind.exe", "bitcoin-cli.exe", "bitcoin-tx.exe", "bitcoin-util.exe", "bitcoin-wallet.exe", "bitcoin-qt.exe")
+          $qt = $null
+          foreach ($bin in $bins) {
+            $found = $null
+            foreach ($dir in $candidates) {
+              $path = Join-Path $dir $bin
+              if (Test-Path $path) {
+                $found = $path
+                break
+              }
+            }
+            if (-not $found) {
+              Write-Host "ERROR: missing $bin"
+              Get-ChildItem -Path build -Filter $bin -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+              exit 1
+            }
+            Copy-Item $found $dist
+            Write-Host "Copied $found"
+            if ($bin -eq "bitcoin-qt.exe") { $qt = Join-Path $dist $bin }
+          }
+          if ($qt) {
+            & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations --dir $dist $qt
+          }
+          $dllDir = "C:\vcpkg-installed\x64-windows\bin"
+          if (Test-Path $dllDir) {
+            Copy-Item (Join-Path $dllDir "*.dll") $dist -ErrorAction SilentlyContinue
+          }
+          foreach ($doc in @("README.md", "COPYING", "MINING.md")) {
+            if (Test-Path $doc) { Copy-Item $doc $dist }
+          }
+          Compress-Archive -Path "$dist\*" -DestinationPath "$dist.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "$dist.zip").Hash.ToLower()
+          "$hash  $dist.zip" | Out-File -FilePath "$dist.zip.sha256" -Encoding ascii -NoNewline
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: |
+            ${{ env.PROJECT_NAME }}-*-win64.zip
+            ${{ env.PROJECT_NAME }}-*-win64.zip.sha256
+
+  macos-arm64:
+    name: macOS ARM64
+    runs-on: macos-15
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew packages
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: |
+          brew install cmake boost pkgconf libevent qt@6 qrencode ccache
+
+      - name: Set Ccache directory
+        run: echo "CCACHE_DIR=${RUNNER_TEMP}/ccache_dir" >> "$GITHUB_ENV"
+
+      - name: Restore Ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: macos-arm64-ccache-${{ github.run_id }}
+          restore-keys: macos-arm64-ccache-
+
+      - name: Configure
+        run: |
+          QT_PREFIX="$(brew --prefix qt@6)"
+          cmake -S . -B build ${{ env.CMAKE_FLAGS }} \
+            -DCMAKE_PREFIX_PATH="${QT_PREFIX}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      - name: Deploy Qt app
+        run: cmake --build build --target deploy
+
+      - name: Package
+        run: |
+          SHORT_SHA="$(echo '${{ github.sha }}' | cut -c1-7)"
+          DISTNAME="${{ env.PROJECT_NAME }}-${SHORT_SHA}-arm64-apple-darwin"
+          mkdir -p "${DISTNAME}/bin"
+
+          if [ -f build/bitcoin-macos-app.zip ]; then
+            mkdir -p "${DISTNAME}/app"
+            unzip -q build/bitcoin-macos-app.zip -d "${DISTNAME}/app"
+          elif [ -d build/Bitcoin-Qt.app ]; then
+            cp -R build/Bitcoin-Qt.app "${DISTNAME}/Bitcoin-Qt.app"
+          else
+            echo "ERROR: macOS deploy output not found"
+            ls -la build || true
+            exit 1
+          fi
+
+          for bin in bitcoind bitcoin-cli bitcoin-tx bitcoin-util bitcoin-wallet; do
+            if [ ! -f "build/bin/${bin}" ]; then
+              echo "ERROR: missing build/bin/${bin}"
+              ls -la build/bin || true
+              exit 1
+            fi
+            strip "build/bin/${bin}" || true
+            cp "build/bin/${bin}" "${DISTNAME}/bin/"
+          done
+          cp README.md COPYING MINING.md "${DISTNAME}/" 2>/dev/null || true
+          ditto -c -k --sequesterRsrc --keepParent "${DISTNAME}" "${DISTNAME}.zip"
+          shasum -a 256 "${DISTNAME}.zip" > "${DISTNAME}.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: |
+            ${{ env.PROJECT_NAME }}-*-arm64-apple-darwin.zip
+            ${{ env.PROJECT_NAME }}-*-arm64-apple-darwin.zip.sha256
+
+      - name: Save Ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: macos-arm64-ccache-${{ github.run_id }}

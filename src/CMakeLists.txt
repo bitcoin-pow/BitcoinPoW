@@ -288,6 +288,12 @@ target_link_libraries(bitcoin_node
     $<TARGET_NAME_IF_EXISTS:libevent::pthreads>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
 )
+# BTCW staking methods in bitcoin_wallet reference node symbols (CheckKernel,
+# BlockAssembler, ProcessNewBlock). bitcoin-wallet does not link bitcoin_node
+# by default, so add it after the node target exists.
+if(BUILD_WALLET_TOOL AND TARGET bitcoin-wallet)
+  target_link_libraries(bitcoin-wallet bitcoin_node)
+endif()
 if(WITH_EMBEDDED_ASMAP)
   target_compile_definitions(bitcoin_node PRIVATE ENABLE_EMBEDDED_ASMAP=1)
   include(TargetDataSources)

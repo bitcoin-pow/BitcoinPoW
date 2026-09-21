@@ -1,5 +1,8 @@
 # Windows / MSVC Build Guide
 
+For a short Visual Studio 2022 walkthrough (no VS 2026 required), see
+[`build-windows-local.md`](./build-windows-local.md).
+
 This guide describes how to build bitcoind, command-line utilities, and GUI on Windows using Microsoft Visual Studio.
 
 For cross-compiling options, please see [`build-windows.md`](./build-windows.md).

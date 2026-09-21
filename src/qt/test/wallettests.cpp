@@ -27,6 +27,7 @@
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
 #include <script/solver.h>
+#include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 #include <wallet/test/util.h>
@@ -60,12 +61,14 @@ using wallet::WalletRescanReserver;
 
 void WalletTests::coinstakeRecords()
 {
+    const CKey staking_key = GenerateRandomKey();
+    const std::string staking_address = EncodeDestination(PKHash(staking_key.GetPubKey()));
     interfaces::WalletTx wtx{};
     CMutableTransaction stake;
     stake.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{1}), 0});
     stake.vout.emplace_back();
     stake.vout[0].SetEmpty();
-    stake.vout.emplace_back(52 * COIN + 1000, CScript{} << OP_TRUE);
+    stake.vout.emplace_back(52 * COIN + 1000, GetScriptForRawPubKey(staking_key.GetPubKey()));
     wtx.tx = MakeTransactionRef(stake);
     wtx.is_coinstake = true;
     wtx.debit = 50 * COIN;
@@ -75,6 +78,7 @@ void WalletTests::coinstakeRecords()
     QCOMPARE(records.size(), 1);
     QCOMPARE(records[0].type, TransactionRecord::Generated);
     QCOMPARE(records[0].idx, 1);
+    QCOMPARE(records[0].address, staking_address);
     QCOMPARE(records[0].credit + records[0].debit, 2 * COIN + 1000);
 
     interfaces::WalletTxStatus status{};
@@ -95,6 +99,13 @@ void WalletTests::coinstakeRecords()
     const auto received = TransactionRecord::decomposeTransaction(wtx);
     QCOMPARE(received.size(), 1);
     QCOMPARE(received[0].credit + received[0].debit, stake.vout[1].nValue);
+
+    // Address-based payouts retain their existing destination encoding.
+    stake.vout[1].scriptPubKey = GetScriptForDestination(PKHash(staking_key.GetPubKey()));
+    wtx.tx = MakeTransactionRef(stake);
+    const auto addressed = TransactionRecord::decomposeTransaction(wtx);
+    QCOMPARE(addressed.size(), 1);
+    QCOMPARE(addressed[0].address, staking_address);
 }
 
 namespace

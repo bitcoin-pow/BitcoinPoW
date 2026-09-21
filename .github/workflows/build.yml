@@ -10,9 +10,11 @@ on:
       - btcw_31.x
   workflow_dispatch:
 
+# Windows vcpkg+Qt configure takes a long time. Do not cancel an in-flight
+# build when another push lands on the same branch.
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   PROJECT_NAME: BitcoinPoW

@@ -13,6 +13,7 @@
 #include <coins.h>
 #include <common/args.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <core_io.h>
@@ -108,6 +109,12 @@ double GetDifficulty(const CBlockIndex& blockindex)
     {
         dDiff /= 256.0;
         nShift--;
+    }
+
+    // undo affects of PoW to PoS hash rate multiplier.
+    if (blockindex.IsProofOfStake())
+    {
+        dDiff /= SIG_DIFF_ADJ;
     }
 
     return dDiff;
@@ -2072,7 +2079,7 @@ static RPCHelpMan getblockstats()
             }
         }
 
-        if (tx->IsCoinBase()) {
+        if (tx->IsCoinBase() || tx->IsCoinStake()) {
             continue;
         }
 
@@ -2116,7 +2123,6 @@ static RPCHelpMan getblockstats()
             }
 
             CAmount txfee = tx_total_in - tx_total_out;
-            CHECK_NONFATAL(MoneyRange(txfee));
             if (do_medianfee) {
                 fee_array.push_back(txfee);
             }

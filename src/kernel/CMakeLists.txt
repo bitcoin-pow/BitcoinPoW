@@ -41,6 +41,7 @@ add_library(bitcoinkernel
   ../policy/rbf.cpp
   ../policy/settings.cpp
   ../policy/truc_policy.cpp
+  ../pos.cpp
   ../pow.cpp
   ../primitives/block.cpp
   ../primitives/transaction.cpp

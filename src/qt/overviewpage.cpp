@@ -116,7 +116,7 @@ public:
         return {DECORATION_SIZE + 8 + minimum_text_width, DECORATION_SIZE};
     }
 
-    BitcoinUnit unit{BitcoinUnit::BTC};
+    BitcoinUnit unit{BitcoinUnit::BTCW};
 
 Q_SIGNALS:
     //! An intermediate signal for emitting from the `paint() const` member function.

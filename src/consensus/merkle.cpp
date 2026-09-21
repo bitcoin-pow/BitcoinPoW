@@ -78,7 +78,14 @@ uint256 BlockWitnessMerkleRoot(const CBlock& block)
     std::vector<uint256> leaves;
     leaves.reserve((block.vtx.size() + 1) & ~1ULL); // capacity rounded up to even
     leaves.emplace_back(); // The witness hash of the coinbase is 0.
-    for (size_t s = 1; s < block.vtx.size(); s++) {
+    size_t first_witness_tx{1};
+    if (block.IsProofOfStake() && block.vtx.size() > 1) {
+        // BTCW commitments historically define both coinbase and coinstake
+        // witness leaves as zero.
+        leaves.emplace_back();
+        first_witness_tx = 2;
+    }
+    for (size_t s = first_witness_tx; s < block.vtx.size(); s++) {
         leaves.push_back(block.vtx[s]->GetWitnessHash().ToUint256());
     }
     return ComputeMerkleRoot(std::move(leaves));

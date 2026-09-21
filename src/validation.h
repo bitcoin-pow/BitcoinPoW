@@ -389,7 +389,7 @@ public:
 /** Functions for validating blocks and updating the block tree */
 
 /** Context-independent validity checks */
-bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true, bool fCheckMerkleRoot = true);
+bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true, bool fCheckMerkleRoot = true, bool fCheckSig = true);
 
 /**
  * Verify a block, including transactions.
@@ -1162,6 +1162,8 @@ public:
     //! should use CurrentChainstate() instead.
     //! @{
     Chainstate& ActiveChainstate() const;
+    bool CanActivateCheckpointChain(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsTrustedHistory(const CBlockIndex& index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     CChain& ActiveChain() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChainstate().m_chain; }
     int ActiveHeight() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Height(); }
     CBlockIndex* ActiveTip() const EXCLUSIVE_LOCKS_REQUIRED(GetMutex()) { return ActiveChain().Tip(); }
@@ -1314,6 +1316,8 @@ public:
      */
     void UpdateUncommittedBlockStructures(CBlock& block, const CBlockIndex* pindexPrev) const;
 
+    bool UpdateHashProof(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensus_params, CBlockIndex* pindex, CCoinsViewCache& view);
+
     /** Produce the necessary coinbase commitment for a block (modifies the hash, don't call for mined blocks). */
     void GenerateCoinbaseCommitment(CBlock& block, const CBlockIndex* pindexPrev) const;
 
@@ -1404,5 +1408,17 @@ bool IsBIP30Unspendable(const uint256& block_hash, int block_height);
 
 // Returns the script flags which should be checked for a given block
 script_verify_flags GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
+
+bool CheckHistoricalCheckpoint(const CBlockHeader& block, const CBlockIndex* prev, const Consensus::Params& params, BlockValidationState& state);
+bool IsCheckpointAnchored(const CBlockIndex& index, const CBlockIndex* checkpoint, const Consensus::Params& params);
+bool CheckBlockSignatureEncoding(const CBlock& block, int height);
+bool CheckBlockRewardDestination(const CBlock& block, int height);
+bool CheckHeaderPoW(const CBlockHeader& block, const Consensus::Params& consensus_params);
+bool CheckHeaderPoS(const CBlockHeader& block, CBlockIndex* pindex, CCoinsViewCache& view);
+bool GetBlockPublicKey(const CBlock& block, std::vector<unsigned char>& pubkey);
+
+/** Recover an output spent after a side-chain fork from main-chain undo data. */
+bool GetSpentCoinFromBlock(const CBlockIndex* pindex, const COutPoint& prevout, Coin* coin);
+bool GetSpentCoinFromMainChain(const CBlockIndex* fork_prev, const COutPoint& prevout, Coin* coin);
 
 #endif // BITCOIN_VALIDATION_H

@@ -6,8 +6,10 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <core_io.h>
+#include <interfaces/chain.h>
 #include <key_io.h>
 #include <rpc/server.h>
+#include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <univalue.h>
 #include <util/translation.h>
@@ -23,6 +25,84 @@
 
 
 namespace wallet {
+
+static node::NodeContext& GetWalletNodeContext(CWallet& wallet)
+{
+    node::NodeContext* node{wallet.chain().context()};
+    if (!node) throw JSONRPCError(RPC_INTERNAL_ERROR, "Wallet node context not found");
+    return *node;
+}
+
+static RPCHelpMan generatestake()
+{
+    return RPCHelpMan{"generatestake",
+        "Attempt to mine and submit one BTCW proof-of-stake block using the loaded descriptor wallet and external GPU shared-memory worker.\n",
+        {{"seconds", RPCArg::Type::NUM, RPCArg::Default{30}, "Maximum seconds to wait for a GPU result (30 recommended; large values may cause duplicate work)"}},
+        RPCResult{RPCResult::Type::STR_HEX, "blockhash", "Hash of the accepted block"},
+        RPCExamples{HelpExampleCli("generatestake", "30")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            std::shared_ptr<CWallet> wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet not found");
+            EnsureWalletIsUnlocked(*wallet);
+            node::NodeContext& node{GetWalletNodeContext(*wallet)};
+            const uint64_t seconds{self.Arg<uint64_t>("seconds")};
+            if (seconds == 0 || seconds > 86400) throw JSONRPCError(RPC_INVALID_PARAMETER, "seconds must be between 1 and 86400");
+            const auto hash{wallet->MineStakeBlock(EnsureChainman(node), EnsureMemPool(node), seconds)};
+            if (!hash) throw JSONRPCError(RPC_WALLET_ERROR, "No eligible kernel, GPU result, or accepted block");
+            return hash->GetHex();
+        }};
+}
+
+static RPCHelpMan setstaking()
+{
+    return RPCHelpMan{"setstaking",
+        "Start or stop continuous BTCW proof-of-stake mining for this wallet.\n",
+        {
+            {"enabled", RPCArg::Type::BOOL, RPCArg::Optional::NO, "True to start or false to stop"},
+            {"seconds", RPCArg::Type::NUM, RPCArg::Default{30}, "Maximum seconds to wait for a GPU result per attempt (30 recommended; large values may cause duplicate work)"},
+        },
+        RPCResult{RPCResult::Type::BOOL, "mining", "Whether continuous staking is active"},
+        RPCExamples{
+            HelpExampleCli("setstaking", "true 30") +
+            HelpExampleCli("setstaking", "false")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
+            std::shared_ptr<CWallet> wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet not found");
+            if (!self.Arg<bool>("enabled")) {
+                wallet->StopStakeMining();
+                return false;
+            }
+            EnsureWalletIsUnlocked(*wallet);
+            node::NodeContext& node{GetWalletNodeContext(*wallet)};
+            const uint64_t seconds{self.Arg<uint64_t>("seconds")};
+            if (seconds == 0 || seconds > 86400) throw JSONRPCError(RPC_INVALID_PARAMETER, "seconds must be between 1 and 86400");
+            if (!wallet->StartStakeMining(EnsureChainman(node), EnsureMemPool(node), seconds) && !wallet->IsStakeMining()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Unable to start continuous staking");
+            }
+            return wallet->IsStakeMining();
+        }};
+}
+
+static RPCHelpMan getstakinginfo()
+{
+    return RPCHelpMan{"getstakinginfo",
+        "Return continuous BTCW staking status for this wallet.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "mining", "Whether continuous staking is active"},
+            {RPCResult::Type::NUM, "weight", "Value of currently eligible staking outputs"},
+        }},
+        RPCExamples{HelpExampleCli("getstakinginfo", "")},
+        [&](const RPCHelpMan&, const JSONRPCRequest& request) -> UniValue {
+            std::shared_ptr<CWallet> wallet{GetWalletForJSONRPCRequest(request)};
+            if (!wallet) throw JSONRPCError(RPC_WALLET_NOT_FOUND, "Wallet not found");
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("mining", wallet->IsStakeMining());
+            result.pushKV("weight", wallet->GetStakeWeight());
+            return result;
+        }};
+}
 
 static const std::map<uint64_t, std::string> WALLET_FLAG_CAVEATS{
     {WALLET_FLAG_AVOID_REUSE,
@@ -884,6 +964,9 @@ RPCHelpMan bumpfee();
 RPCHelpMan psbtbumpfee();
 RPCHelpMan send();
 RPCHelpMan sendall();
+RPCHelpMan tx();
+RPCHelpMan txzap();
+RPCHelpMan make_utxos();
 RPCHelpMan walletprocesspsbt();
 RPCHelpMan walletcreatefundedpsbt();
 RPCHelpMan signrawtransactionwithwallet();
@@ -925,6 +1008,8 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &gettransaction},
         {"wallet", &getbalances},
         {"wallet", &getwalletinfo},
+        {"wallet", &generatestake},
+        {"wallet", &getstakinginfo},
         {"wallet", &importdescriptors},
         {"wallet", &importprunedfunds},
         {"wallet", &keypoolrefill},
@@ -948,6 +1033,7 @@ std::span<const CRPCCommand> GetWalletRPCCommands()
         {"wallet", &sendmany},
         {"wallet", &sendtoaddress},
         {"wallet", &setlabel},
+        {"wallet", &setstaking},
         {"wallet", &setwalletflag},
         {"wallet", &signmessage},
         {"wallet", &signrawtransactionwithwallet},

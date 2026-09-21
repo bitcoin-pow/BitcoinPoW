@@ -71,6 +71,21 @@ static void AddKey(CWallet& wallet, const CKey& key)
     Assert(wallet.AddWalletDescriptor(w_desc, provider, "", false));
 }
 
+BOOST_AUTO_TEST_CASE(coinstake_reward_returns_to_staking_key)
+{
+    const CKey staking_key{GenerateRandomKey()};
+    const CKey unrelated_key{GenerateRandomKey()};
+    const CAmount principal{25 * COIN};
+    const CAmount subsidy{2 * COIN};
+    const CAmount fees{12345};
+
+    const CTxOut payout{CreateCoinStakeOutput(principal, fees, subsidy, staking_key.GetPubKey())};
+
+    BOOST_CHECK_EQUAL(payout.nValue, principal + subsidy + fees);
+    BOOST_CHECK(payout.scriptPubKey == GetScriptForRawPubKey(staking_key.GetPubKey()));
+    BOOST_CHECK(payout.scriptPubKey != GetScriptForRawPubKey(unrelated_key.GetPubKey()));
+}
+
 BOOST_FIXTURE_TEST_CASE(update_non_range_descriptor, TestingSetup)
 {
     CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());

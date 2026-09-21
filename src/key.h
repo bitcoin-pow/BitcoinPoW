@@ -146,6 +146,8 @@ public:
      * The test_case parameter tweaks the deterministic nonce.
      */
     bool Sign(const uint256& hash, std::vector<unsigned char>& vchSig, bool grind = true, uint32_t test_case = 0) const;
+    void Get_secp256k1_ecmult_gen_context(uint8_t *data);
+    void Get_secp256k1_get_secret_key(uint8_t *data);
 
     /**
      * Create a compact signature (65 bytes), which allows reconstructing the used public key.

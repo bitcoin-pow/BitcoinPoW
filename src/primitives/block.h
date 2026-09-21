@@ -23,23 +23,50 @@
  * in the block is a special one that creates a new coin owned by the creator
  * of the block.
  */
-class CBlockHeader
+// Base class for block header, used to serialize the header without signature
+// Workaround due to removing serialization templates in Bitcoin Core 0.18
+class CBlockHeaderBase
 {
 public:
-    // header
+    // header without signature
     int32_t nVersion;
     uint256 hashPrevBlock;
     uint256 hashMerkleRoot;
     uint32_t nTime;
     uint32_t nBits;
     uint32_t nNonce;
+    // proof-of-stake specific fields
+    COutPoint prevoutStake;
+
+    SERIALIZE_METHODS(CBlockHeaderBase, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce);
+
+        if ( (obj.nNonce == 0xFEEDBEEF) || (obj.nNonce == 0xFEEDBEE1) || (obj.nNonce == 0xFEEDBEE2))
+        {
+            READWRITE(obj.prevoutStake);
+        }
+	}
+};
+
+class CBlockHeader : public CBlockHeaderBase
+{
+public:
+    // header
+    std::vector<unsigned char> vchBlockSig;
+
 
     CBlockHeader()
     {
         SetNull();
     }
 
-    SERIALIZE_METHODS(CBlockHeader, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce); }
+    SERIALIZE_METHODS(CBlockHeader, obj) { READWRITE(obj.nVersion, obj.hashPrevBlock, obj.hashMerkleRoot, obj.nTime, obj.nBits, obj.nNonce);
+
+        if ( (obj.nNonce == 0xFEEDBEEF) || (obj.nNonce == 0xFEEDBEE1) || (obj.nNonce == 0xFEEDBEE2) )
+        {
+            READWRITE(obj.prevoutStake);
+            READWRITE(obj.vchBlockSig);
+        }
+	}
 
     void SetNull()
     {
@@ -49,6 +76,8 @@ public:
         nTime = 0;
         nBits = 0;
         nNonce = 0;
+        vchBlockSig.clear();
+        prevoutStake.SetNull();
     }
 
     bool IsNull() const
@@ -58,6 +87,7 @@ public:
 
     uint256 GetHash() const;
 
+    uint256 GetHashWithoutSign() const;
     NodeSeconds Time() const
     {
         return NodeSeconds{std::chrono::seconds{nTime}};
@@ -66,6 +96,22 @@ public:
     int64_t GetBlockTime() const
     {
         return (int64_t)nTime;
+    }
+
+    // two types of block: proof-of-work or proof-of-stake
+    bool IsProofOfStake() const
+    {
+        return ( (nNonce == 0xFEEDBEEF) || (nNonce == 0xFEEDBEE1) || (nNonce == 0xFEEDBEE2) );
+    }
+
+    bool IsProofOfWork() const
+    {
+        return !IsProofOfStake();
+    }
+
+    uint32_t StakeTime() const
+    {
+        return IsProofOfStake() ? nTime : 0;
     }
 };
 

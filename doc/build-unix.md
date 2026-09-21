@@ -21,6 +21,40 @@ See below for instructions on how to [install the dependencies on popular Linux
 distributions](#linux-distribution-specific-instructions), or the
 [dependencies](#dependencies) section for a complete overview.
 
+BTCW Qt Build (Ubuntu/Pop!_OS)
+------------------------------
+
+These are the commands used to build the BTCW Qt wallet. Run them from the
+repository root (for example, `~/dev/BitcoinPoW`), **not** from `src/`:
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential cmake pkgconf python3 \
+    libevent-dev libboost-dev libsqlite3-dev \
+    qt6-base-dev qt6-tools-dev qt6-l10n-tools qt6-tools-dev-tools \
+    qt6-wayland libgl-dev libqrencode-dev
+
+cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DBUILD_GUI=ON \
+    -DENABLE_WALLET=ON \
+    -DENABLE_IPC=OFF \
+    -DBUILD_TESTS=OFF \
+    -DBUILD_BENCH=OFF
+
+cmake --build build --target bitcoin-qt -j"$(nproc)"
+```
+
+The executable is produced at:
+
+```bash
+./build/bin/bitcoin-qt
+```
+
+`ENABLE_IPC=OFF` is intentional for this build and avoids requiring Cap'n
+Proto. It does not disable the wallet, Qt interface, node, or BTCW mining
+functionality.
+
 ## Memory Requirements
 
 C++ compilers are memory-hungry. It is recommended to have at least 1.5 GB of

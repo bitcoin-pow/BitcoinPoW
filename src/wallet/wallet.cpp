@@ -17,7 +17,9 @@
 #include <common/system.h>
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
+#include <consensus/merkle.h>
 #include <consensus/validation.h>
+#include <script/interpreter.h>
 #include <external_signer.h>
 #include <interfaces/chain.h>
 #include <interfaces/handler.h>
@@ -28,6 +30,7 @@
 #include <key_io.h>
 #include <logging.h>
 #include <node/types.h>
+#include <node/miner.h>
 #include <outputtype.h>
 #include <policy/feerate.h>
 #include <policy/truc_policy.h>
@@ -58,28 +61,41 @@
 #include <util/moneystr.h>
 #include <util/result.h>
 #include <util/string.h>
+#include <util/threadnames.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
+#include <wallet/coinselection.h>
 #include <wallet/context.h>
 #include <wallet/crypter.h>
 #include <wallet/db.h>
 #include <wallet/external_signer_scriptpubkeyman.h>
+#include <wallet/receive.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/types.h>
 #include <wallet/walletdb.h>
 #include <wallet/walletutil.h>
-
+#include <pos.h>
+#include <validation.h>
+#include <net.h>
 #include <algorithm>
 #include <cassert>
 #include <condition_variable>
 #include <exception>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
 #include <variant>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 struct KeyOriginInfo;
 
@@ -157,12 +173,14 @@ bool AddWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet)
     context.wallets.push_back(wallet);
     wallet->ConnectScriptPubKeyManNotifiers();
     wallet->NotifyCanGetAddressesChanged();
+
     return true;
 }
 
 bool RemoveWallet(WalletContext& context, const std::shared_ptr<CWallet>& wallet, std::optional<bool> load_on_start, std::vector<bilingual_str>& warnings)
 {
     assert(wallet);
+    wallet->StopStakeMining();
 
     interfaces::Chain& chain = wallet->chain();
     std::string name = wallet->GetName();
@@ -2017,7 +2035,7 @@ bool CWallet::SubmitTxMemoryPoolAndRelay(CWalletTx& wtx,
     if (wtx.isAbandoned()) return false;
     // Don't try to submit coinbase transactions. These would fail anyway but would
     // cause log spam.
-    if (wtx.IsCoinBase()) return false;
+    if (wtx.IsCoinBase() || wtx.IsCoinStake()) return false;
     // Don't try to submit conflicted or confirmed transactions.
     if (GetTxDepthInMainChain(wtx) != 0) return false;
 
@@ -2162,7 +2180,7 @@ bool CWallet::SignTransaction(CMutableTransaction& tx) const
         }
         const CWalletTx& wtx = mi->second;
         int prev_height = wtx.state<TxStateConfirmed>() ? wtx.state<TxStateConfirmed>()->confirmed_block_height : 0;
-        coins[input.prevout] = Coin(wtx.tx->vout[input.prevout.n], prev_height, wtx.IsCoinBase());
+        coins[input.prevout] = Coin(wtx.tx->vout[input.prevout.n], prev_height, wtx.IsCoinBase(), wtx.IsCoinStake());
     }
     std::map<int, bilingual_str> input_errors;
     return SignTransaction(tx, coins, SIGHASH_DEFAULT, input_errors);
@@ -3306,6 +3324,7 @@ void CWallet::postInitProcess()
 
     // Update wallet transactions with current mempool transactions.
     WITH_LOCK(cs_wallet, chain().requestMempoolTransactions(*this));
+
 }
 
 bool CWallet::BackupWallet(const std::string& strDest) const
@@ -3337,7 +3356,7 @@ int CWallet::GetTxBlocksToMaturity(const CWalletTx& wtx) const
     }
     int chain_depth = GetTxDepthInMainChain(wtx);
     assert(chain_depth >= 0); // coinbase tx should not be conflicted
-    return std::max(0, (COINBASE_MATURITY+1) - chain_depth);
+    return std::max(0, (COINBASE_MATURITY()+1) - chain_depth);
 }
 
 bool CWallet::IsTxImmatureCoinBase(const CWalletTx& wtx) const
@@ -4584,6 +4603,316 @@ void CWallet::DisconnectChainNotifications()
         m_chain_notifications_handler->disconnect();
         chain().waitForNotifications();
         m_chain_notifications_handler.reset();
+    }
+}
+
+uint64_t CWallet::GetStakeWeight() const
+{
+    LOCK(cs_wallet);
+    CAmount total{0};
+    std::set<std::pair<const CWalletTx*, unsigned int>> coins;
+    SelectCoinsForStaking(coins);
+    for (const auto& [wtx, n] : coins) total += wtx->tx->vout[n].nValue;
+    return total > 0 ? static_cast<uint64_t>(total) : 0;
+}
+
+CTxOut CreateCoinStakeOutput(CAmount principal, CAmount fees, CAmount subsidy, const CPubKey& pubkey)
+{
+    return CTxOut{principal + subsidy + fees, CScript{} << ToByteVector(pubkey) << OP_CHECKSIG};
+}
+
+bool CWallet::CreateCoinStake(ChainstateManager& chainman, const CWallet&, unsigned int nBits,
+                              const CAmount& fees, uint32_t& block_time, uint32_t nonce,
+                              CMutableTransaction& tx, CKey& key,
+                              const std::set<std::pair<const CWalletTx*, unsigned int>>& coins)
+{
+    LOCK(cs_wallet);
+    CBlockIndex* tip{chainman.ActiveChain().Tip()};
+    if (!tip) {
+        WalletLogPrintf("Stake creation failed: no active chain tip\n");
+        return false;
+    }
+    if (IsLocked()) {
+        WalletLogPrintf("Stake creation failed: wallet is locked\n");
+        return false;
+    }
+
+    // Start at a random candidate, then visit every remaining candidate once
+    // without copying or modifying the caller's set.
+    FastRandomContext rng;
+    auto selected{coins.begin()};
+    if (!coins.empty()) {
+        std::advance(selected, rng.randrange(coins.size()));
+    }
+    for (size_t attempted{0}; attempted < coins.size(); ++attempted) {
+        const auto current{selected};
+        if (++selected == coins.end()) selected = coins.begin();
+        const auto& [wtx, n] = *current;
+        const CTxOut& prevout{wtx->tx->vout.at(n)};
+        const COutPoint kernel{wtx->GetHash(), n};
+        if (!CheckKernel(tip, nBits, block_time, nonce, kernel, chainman.ActiveChainstate().CoinsTip())) continue;
+
+        std::vector<std::vector<unsigned char>> solutions;
+        const TxoutType type{Solver(prevout.scriptPubKey, solutions)};
+        if (type != TxoutType::PUBKEY && type != TxoutType::PUBKEYHASH) continue;
+        std::unique_ptr<SigningProvider> provider{GetSolvingProvider(prevout.scriptPubKey)};
+        if (!provider) {
+            WalletLogPrintf("Stake candidate %s:%u has no signing provider\n", kernel.hash.ToString(), kernel.n);
+            continue;
+        }
+
+        CPubKey pubkey;
+        if (type == TxoutType::PUBKEY) {
+            pubkey = CPubKey{solutions.at(0)};
+        } else if (!provider->GetPubKey(CKeyID{uint160{solutions.at(0)}}, pubkey)) {
+            continue;
+        }
+        // Descriptor wallets deliberately omit private keys from their solving
+        // provider. Ask the owning descriptor manager for a signing provider,
+        // which derives and includes the private key for this child pubkey.
+        if (IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+            for (ScriptPubKeyMan* spkm : GetScriptPubKeyMans(prevout.scriptPubKey)) {
+                auto* desc_spkm{dynamic_cast<DescriptorScriptPubKeyMan*>(spkm)};
+                if (!desc_spkm) continue;
+                if (auto signing_provider{desc_spkm->GetSigningProvider(pubkey)}) {
+                    provider = std::move(signing_provider);
+                    break;
+                }
+            }
+        }
+        if (!provider->GetKey(pubkey.GetID(), key)) {
+            WalletLogPrintf("Stake candidate %s:%u has no private key\n", kernel.hash.ToString(), kernel.n);
+            continue;
+        }
+
+        CMutableTransaction stake;
+        stake.vin.emplace_back(kernel);
+        stake.vout.emplace_back();
+        stake.vout[0].SetEmpty();
+        stake.vout.push_back(CreateCoinStakeOutput(
+            prevout.nValue, fees, GetBlockSubsidy(tip->nHeight + 1, Params().GetConsensus()), pubkey));
+        SignatureData sigdata;
+        if (!SignSignature(*provider, prevout.scriptPubKey, stake, 0, prevout.nValue, SIGHASH_ALL, sigdata)) {
+            WalletLogPrintf("Stake candidate %s:%u could not sign coinstake\n", kernel.hash.ToString(), kernel.n);
+            continue;
+        }
+        UpdateInput(stake.vin[0], sigdata);
+        tx = std::move(stake);
+        return true;
+    }
+    return false;
+}
+
+bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) const
+{
+#ifdef _WIN32
+    LogError("GPU shared-memory mining is not yet available on Windows");
+    return false;
+#else
+    static constexpr char SHM_NAME[]{"/shared_mem"};
+    static constexpr uint64_t SENTINEL_NONCE{0x0707070707070707ULL};
+    static constexpr size_t KEY_BYTES{32};
+    static constexpr size_t CONTEXT_BYTES{160};
+    static constexpr size_t HASH_BYTES{32};
+    struct SharedData {
+        volatile uint64_t nonce;
+        volatile uint8_t data[KEY_BYTES + CONTEXT_BYTES + HASH_BYTES];
+    };
+
+    arith_uint256 target;
+    target.SetCompact(block.nBits);
+    target *= SIG_DIFF_ADJ;
+    block.nNonce = CURRENT_MINING_NONCE;
+    block.vchBlockSig.clear();
+    const uint256 hash{block.GetHashWithoutSign()};
+
+    const int fd{shm_open(SHM_NAME, O_CREAT | O_RDWR, 0600)};
+    if (fd < 0 || ftruncate(fd, sizeof(SharedData)) != 0) {
+        if (fd >= 0) close(fd);
+        return false;
+    }
+    auto* shared{static_cast<SharedData*>(mmap(nullptr, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0))};
+    close(fd);
+    if (shared == MAP_FAILED) return false;
+
+    std::array<uint8_t, KEY_BYTES + CONTEXT_BYTES + HASH_BYTES> work{};
+    key.Get_secp256k1_get_secret_key(work.data());
+    key.Get_secp256k1_ecmult_gen_context(work.data() + KEY_BYTES);
+    std::memcpy(work.data() + KEY_BYTES + CONTEXT_BYTES, hash.data(), HASH_BYTES);
+    shared->nonce = SENTINEL_NONCE;
+    std::memcpy(const_cast<uint8_t*>(shared->data), work.data(), work.size());
+
+    uint64_t previous{SENTINEL_NONCE};
+    bool found{false};
+    bool abort{false};
+    for (uint64_t second{0}; second < max_seconds && !found && !abort; ++second) {
+        for (int poll{0}; poll < 20; ++poll) {
+            if (m_stake_mining_active.load() && m_stake_mining_stop.load()) {
+                abort = true;
+                break;
+            }
+            const uint64_t nonce{shared->nonce};
+            if (nonce == 0 || nonce == SENTINEL_NONCE || nonce == previous) {
+                UninterruptibleSleep(std::chrono::milliseconds{50});
+                continue;
+            }
+            previous = nonce;
+            std::vector<unsigned char> signature;
+            if (!key.Sign(hash, signature, /*grind=*/false, nonce)) {
+                WalletLogPrintf("GPU result nonce=%016x signing_failed=true found=false\n", nonce);
+                abort = true;
+                break;
+            }
+            const uint256 proof_hash{Hash(signature)};
+            const bool meets_target{(signature.size() == 70 || signature.size() == 71) &&
+                                    UintToArith256(proof_hash) <= target};
+            WalletLogPrintf("GPU result nonce=%016x pow_hash=%s target=%s signature_size=%u found=%s\n",
+                            nonce, proof_hash.ToString(), ArithToUint256(target).ToString(),
+                            signature.size(), meets_target ? "true" : "false");
+            if (meets_target) {
+                block.vchBlockSig = std::move(signature);
+                found = true;
+                break;
+            }
+        }
+    }
+    std::memset(const_cast<uint8_t*>(shared->data), 0, sizeof(shared->data));
+    munmap(shared, sizeof(SharedData));
+    return found;
+#endif
+}
+
+std::optional<uint256> CWallet::MineStakeBlock(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds)
+{
+    LOCK(m_stake_mining_mutex);
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = CScript{};
+    options.include_dummy_extranonce = true;
+    options.test_block_validity = false;
+    auto block_template{node::BlockAssembler{chainman.ActiveChainstate(), &mempool, options}.CreateNewBlock()};
+    if (!block_template) return std::nullopt;
+    CBlock block{std::move(block_template->block)};
+    // vTxFees contains only non-coinbase transaction fees and may be empty.
+    const CAmount fees{std::accumulate(block_template->vTxFees.begin(), block_template->vTxFees.end(), CAmount{0})};
+
+    CMutableTransaction coinbase{*block.vtx.at(0)};
+    coinbase.vout.assign(1, CTxOut{});
+    coinbase.vout[0].SetEmpty();
+    coinbase.vin[0].scriptWitness.SetNull();
+    block.vtx[0] = MakeTransactionRef(std::move(coinbase));
+
+    std::set<std::pair<const CWalletTx*, unsigned int>> coins;
+    SelectCoinsForStaking(coins);
+    if (coins.empty()) {
+        WalletLogPrintf("Stake creation failed: no eligible P2PK/P2PKH wallet outputs\n");
+        return std::nullopt;
+    }
+    CMutableTransaction coinstake;
+    CKey key;
+    uint32_t block_time{block.nTime};
+    block.nNonce = CURRENT_MINING_NONCE;
+    if (!CreateCoinStake(chainman, *this, block.nBits, fees, block_time, block.nNonce, coinstake, key, coins)) return std::nullopt;
+    block.nTime = block_time;
+    block.vtx.insert(block.vtx.begin() + 1, MakeTransactionRef(std::move(coinstake)));
+    block.prevoutStake = block.vtx[1]->vin[0].prevout;
+
+    {
+        LOCK(cs_main);
+        CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        if (!tip || tip->GetBlockHash() != block.hashPrevBlock) return std::nullopt;
+        chainman.GenerateCoinbaseCommitment(block, tip);
+    }
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    if (!SignStakeBlock(block, key, max_seconds)) return std::nullopt;
+
+    auto mined{std::make_shared<const CBlock>(std::move(block))};
+    bool is_new{false};
+    if (!chainman.ProcessNewBlock(mined, true, false, &is_new) || !is_new) return std::nullopt;
+    return mined->GetHash();
+}
+
+bool CWallet::StartStakeMining(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds)
+{
+    LOCK(m_stake_thread_mutex);
+    if (max_seconds == 0 || m_stake_mining_thread.joinable()) return false;
+    m_stake_mining_stop.store(false);
+    m_stake_mining_active.store(true);
+    try {
+        m_stake_mining_thread = std::thread([this, &chainman, &mempool, max_seconds] {
+            util::ThreadRename("btcw-staker");
+            WalletLogPrintf("Continuous staking started (seconds per attempt: %u)\n", max_seconds);
+            while (!m_stake_mining_stop.load()) {
+                try {
+                    if (const auto hash{MineStakeBlock(chainman, mempool, max_seconds)}) {
+                        WalletLogPrintf("Mined BTCW block %s\n", hash->ToString());
+                    }
+                } catch (const std::exception& e) {
+                    WalletLogPrintf("Continuous staking attempt failed: %s\n", e.what());
+                }
+                for (int i{0}; i < 10 && !m_stake_mining_stop.load(); ++i) {
+                    UninterruptibleSleep(std::chrono::milliseconds{100});
+                }
+            }
+            m_stake_mining_active.store(false);
+            WalletLogPrintf("Continuous staking stopped\n");
+        });
+    } catch (...) {
+        m_stake_mining_active.store(false);
+        throw;
+    }
+    return true;
+}
+
+void CWallet::StopStakeMining()
+{
+    LOCK(m_stake_thread_mutex);
+    m_stake_mining_stop.store(true);
+    if (m_stake_mining_thread.joinable()) m_stake_mining_thread.join();
+    m_stake_mining_active.store(false);
+}
+
+void CWallet::SelectCoinsForStaking(std::set<std::pair<const CWalletTx*, unsigned int>>& coins) const
+{
+    LOCK(cs_wallet);
+    coins.clear();
+    size_t immature{0};
+    size_t unavailable{0};
+    size_t not_mine{0};
+    size_t unsupported{0};
+    size_t unsolvable{0};
+    for (const auto& [wtxid, wtx] : mapWallet) {
+        if (GetTxDepthInMainChain(wtx) < COINBASE_MATURITY()) {
+            immature += wtx.tx->vout.size();
+            continue;
+        }
+        for (unsigned int i = 0; i < wtx.tx->vout.size(); ++i) {
+            const COutPoint outpoint{wtxid, i};
+            const CTxOut& output{wtx.tx->vout[i]};
+            if (IsSpent(outpoint) || IsLockedCoin(outpoint) || output.nValue <= 0) {
+                ++unavailable;
+                continue;
+            }
+            if (!IsMine(output)) {
+                ++not_mine;
+                continue;
+            }
+            std::vector<std::vector<unsigned char>> solutions;
+            const TxoutType type{Solver(output.scriptPubKey, solutions)};
+            if (type != TxoutType::PUBKEY && type != TxoutType::PUBKEYHASH) {
+                ++unsupported;
+                continue;
+            }
+            const std::unique_ptr<SigningProvider> provider{GetSolvingProvider(output.scriptPubKey)};
+            if (!provider || !IsSolvable(*provider, output.scriptPubKey)) {
+                ++unsolvable;
+                continue;
+            }
+            coins.emplace(&wtx, i);
+        }
+    }
+    if (coins.empty()) {
+        WalletLogPrintf("No staking outputs: immature=%u unavailable=%u not_mine=%u unsupported=%u unsolvable=%u\n",
+                        immature, unavailable, not_mine, unsupported, unsolvable);
     }
 }
 

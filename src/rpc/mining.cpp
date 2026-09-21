@@ -426,7 +426,8 @@ static RPCHelpMan getmininginfo()
                         {RPCResult::Type::NUM, "currentblocktx", /*optional=*/true, "The number of block transactions (excluding coinbase) of the last assembled block (only present if a block was ever assembled)"},
                         {RPCResult::Type::STR_HEX, "bits", "The current nBits, compact representation of the block difficulty target"},
                         {RPCResult::Type::NUM, "difficulty", "The current difficulty"},
-                        {RPCResult::Type::STR_HEX, "target", "The current target"},
+                        {RPCResult::Type::STR_HEX, "target", "The raw target encoded by nBits"},
+                        {RPCResult::Type::STR_HEX, "signaturetarget", /*optional=*/true, "The effective Stage 2 signature-work target, including SIG_DIFF_ADJ (proof-of-stake only)"},
                         {RPCResult::Type::NUM, "networkhashps", "The network hashes per second"},
                         {RPCResult::Type::NUM, "pooledtx", "The size of the mempool"},
                         {RPCResult::Type::STR_AMOUNT, "blockmintxfee", "Minimum feerate of packages selected for block inclusion in " + CURRENCY_UNIT + "/kvB"},
@@ -437,7 +438,8 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::NUM, "height", "The next height"},
                             {RPCResult::Type::STR_HEX, "bits", "The next target nBits"},
                             {RPCResult::Type::NUM, "difficulty", "The next difficulty"},
-                            {RPCResult::Type::STR_HEX, "target", "The next target"}
+                            {RPCResult::Type::STR_HEX, "target", "The next raw target encoded by nBits"},
+                            {RPCResult::Type::STR_HEX, "signaturetarget", /*optional=*/true, "The next effective Stage 2 signature-work target, including SIG_DIFF_ADJ (proof-of-stake only)"}
                         }},
                         (IsDeprecatedRPCEnabled("warnings") ?
                             RPCResult{RPCResult::Type::STR, "warnings", "any network and blockchain warnings (DEPRECATED)"} :
@@ -467,7 +469,11 @@ static RPCHelpMan getmininginfo()
     if (BlockAssembler::m_last_block_num_txs) obj.pushKV("currentblocktx", *BlockAssembler::m_last_block_num_txs);
     obj.pushKV("bits", strprintf("%08x", tip.nBits));
     obj.pushKV("difficulty", GetDifficulty(tip));
-    obj.pushKV("target", GetTarget(tip, chainman.GetConsensus().powLimit).GetHex());
+    const uint256 tip_target{GetTarget(tip, chainman.GetConsensus().powLimit)};
+    obj.pushKV("target", tip_target.GetHex());
+    if (tip.IsProofOfStake()) {
+        obj.pushKV("signaturetarget", ArithToUint256(UintToArith256(tip_target) * SIG_DIFF_ADJ).GetHex());
+    }
     obj.pushKV("networkhashps",    getnetworkhashps().HandleRequest(request));
     obj.pushKV("pooledtx", mempool.size());
     BlockAssembler::Options assembler_options;
@@ -482,7 +488,11 @@ static RPCHelpMan getmininginfo()
     next.pushKV("height", next_index.nHeight);
     next.pushKV("bits", strprintf("%08x", next_index.nBits));
     next.pushKV("difficulty", GetDifficulty(next_index));
-    next.pushKV("target", GetTarget(next_index, chainman.GetConsensus().powLimit).GetHex());
+    const uint256 next_target{GetTarget(next_index, chainman.GetConsensus().powLimit)};
+    next.pushKV("target", next_target.GetHex());
+    if (next_index.IsProofOfStake()) {
+        next.pushKV("signaturetarget", ArithToUint256(UintToArith256(next_target) * SIG_DIFF_ADJ).GetHex());
+    }
     obj.pushKV("next", next);
 
     if (chainman.GetParams().GetChainType() == ChainType::SIGNET) {

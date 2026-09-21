@@ -86,6 +86,26 @@ UniValue RPCTestingSetup::CallRPC(std::string args)
 
 BOOST_FIXTURE_TEST_SUITE(rpc_tests, RPCTestingSetup)
 
+BOOST_AUTO_TEST_CASE(rpc_convert_values_staking)
+{
+    const UniValue start{RPCConvertValues("setstaking", {"true", "30"})};
+    BOOST_REQUIRE_EQUAL(start.size(), 2U);
+    BOOST_CHECK(start[0].isBool());
+    BOOST_CHECK(start[0].get_bool());
+    BOOST_CHECK(start[1].isNum());
+    BOOST_CHECK_EQUAL(start[1].getInt<int>(), 30);
+
+    const UniValue stop{RPCConvertValues("setstaking", {"false"})};
+    BOOST_REQUIRE_EQUAL(stop.size(), 1U);
+    BOOST_CHECK(stop[0].isBool());
+    BOOST_CHECK(!stop[0].get_bool());
+
+    const UniValue single_attempt{RPCConvertValues("generatestake", {"30"})};
+    BOOST_REQUIRE_EQUAL(single_attempt.size(), 1U);
+    BOOST_CHECK(single_attempt[0].isNum());
+    BOOST_CHECK_EQUAL(single_attempt[0].getInt<int>(), 30);
+}
+
 BOOST_AUTO_TEST_CASE(rpc_namedparams)
 {
     const std::vector<std::pair<std::string, bool>> arg_names{{"arg1", false}, {"arg2", false}, {"arg3", false}, {"arg4", false}, {"arg5", false}};

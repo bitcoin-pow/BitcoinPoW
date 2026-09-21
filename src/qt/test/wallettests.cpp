@@ -8,6 +8,7 @@
 #include <wallet/coincontrol.h>
 #include <interfaces/chain.h>
 #include <interfaces/node.h>
+#include <interfaces/wallet.h>
 #include <key_io.h>
 #include <qt/bitcoinamountfield.h>
 #include <qt/bitcoinunits.h>
@@ -22,6 +23,7 @@
 #include <qt/sendcoinsdialog.h>
 #include <qt/sendcoinsentry.h>
 #include <qt/transactiontablemodel.h>
+#include <qt/transactionrecord.h>
 #include <qt/transactionview.h>
 #include <qt/walletmodel.h>
 #include <script/solver.h>
@@ -55,6 +57,45 @@ using wallet::WALLET_FLAG_DISABLE_PRIVATE_KEYS;
 using wallet::WalletContext;
 using wallet::WalletDescriptor;
 using wallet::WalletRescanReserver;
+
+void WalletTests::coinstakeRecords()
+{
+    interfaces::WalletTx wtx{};
+    CMutableTransaction stake;
+    stake.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{1}), 0});
+    stake.vout.emplace_back();
+    stake.vout[0].SetEmpty();
+    stake.vout.emplace_back(52 * COIN + 1000, CScript{} << OP_TRUE);
+    wtx.tx = MakeTransactionRef(stake);
+    wtx.is_coinstake = true;
+    wtx.debit = 50 * COIN;
+    wtx.credit = 52 * COIN + 1000;
+    wtx.txout_is_mine = {false, true};
+    auto records = TransactionRecord::decomposeTransaction(wtx);
+    QCOMPARE(records.size(), 1);
+    QCOMPARE(records[0].type, TransactionRecord::Generated);
+    QCOMPARE(records[0].idx, 1);
+    QCOMPARE(records[0].credit + records[0].debit, 2 * COIN + 1000);
+
+    interfaces::WalletTxStatus status{};
+    status.is_coinstake = true;
+    status.is_in_main_chain = true;
+    status.is_trusted = true;
+    status.depth_in_main_chain = 6;
+    records[0].updateStatus(status, uint256{1}, 100, 0);
+    QCOMPARE(records[0].status.status, TransactionStatus::Confirmed);
+    status.is_in_main_chain = false;
+    status.is_trusted = false;
+    status.depth_in_main_chain = 0;
+    records[0].updateStatus(status, uint256{2}, 100, 0);
+    QCOMPARE(records[0].status.status, TransactionStatus::NotAccepted);
+
+    // Incoming stake rewards without a wallet-owned input are all credit.
+    wtx.debit = 0;
+    const auto received = TransactionRecord::decomposeTransaction(wtx);
+    QCOMPARE(received.size(), 1);
+    QCOMPARE(received[0].credit + received[0].debit, stake.vout[1].nValue);
+}
 
 namespace
 {

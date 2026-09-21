@@ -34,6 +34,25 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
     Txid hash = wtx.tx->GetHash();
     std::map<std::string, std::string> mapValue = wtx.value_map;
 
+    if (wtx.is_coinstake) {
+        // The stake principal is returned, not sent to another recipient.
+        // Show the wallet's net reward once, omitting the empty marker output.
+        CAmount credit{0};
+        int output_index{0};
+        for (size_t i = 0; i < wtx.tx->vout.size(); ++i) {
+            if (wtx.txout_is_mine[i]) {
+                credit += wtx.tx->vout[i].nValue;
+                output_index = i;
+            }
+        }
+        if (credit > 0 || nDebit > 0) {
+            TransactionRecord record(hash, nTime, TransactionRecord::Generated, "", -nDebit, credit);
+            record.idx = output_index;
+            parts.append(record);
+        }
+        return parts;
+    }
+
     bool all_from_me = true;
     bool any_from_me = false;
     if (wtx.is_coinbase) {
@@ -159,7 +178,10 @@ void TransactionRecord::updateStatus(const interfaces::WalletTxStatus& wtx, cons
 
     // For generated transactions, determine maturity
     if (type == TransactionRecord::Generated) {
-        if (wtx.blocks_to_maturity > 0)
+        if (wtx.is_coinstake && !wtx.is_in_main_chain) {
+            status.status = TransactionStatus::NotAccepted;
+        }
+        else if (wtx.blocks_to_maturity > 0)
         {
             status.status = TransactionStatus::Immature;
 

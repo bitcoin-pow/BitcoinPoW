@@ -1,0 +1,94 @@
+# Copyright (c) 2026 The Bitcoin PoW Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v31.*'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          sha="${GITHUB_SHA}"
+          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?per_page=20" \
+            --jq "[.workflow_runs[] | select(.head_sha == \"${sha}\" and .conclusion == \"success\") | .id] | first")"
+          if [ -z "${run_id}" ] || [ "${run_id}" = "null" ]; then
+            run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?branch=btcw_31.x&status=completed&per_page=10" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success") | .id] | first')"
+          fi
+          echo "Using Build run ${run_id}"
+          gh run download "${run_id}" --repo "${GITHUB_REPOSITORY}" --dir artifacts
+          find artifacts -type f | sort
+
+      - name: Stage versioned files
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          linux="$(find artifacts -name 'BitcoinPoW-*-x86_64-linux-gnu.tar.gz' | head -1)"
+          win="$(find artifacts -name 'BitcoinPoW-*-win64.zip' | head -1)"
+          mac="$(find artifacts -name 'BitcoinPoW-*-arm64-apple-darwin.zip' | head -1)"
+          test -n "${linux}" && test -n "${win}" && test -n "${mac}"
+          cp "${linux}" "dist/BitcoinPoW-${TAG}-x86_64-linux-gnu.tar.gz"
+          cp "${win}" "dist/BitcoinPoW-${TAG}-win64.zip"
+          cp "${mac}" "dist/BitcoinPoW-${TAG}-arm64-apple-darwin.zip"
+          (cd dist && sha256sum BitcoinPoW-${TAG}-* > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          {
+            echo "## Bitcoin PoW ${TAG}"
+            echo
+            echo "First Bitcoin Core 31.x BTCW node and Qt wallet builds from \`btcw_31.x\`."
+            echo
+            echo "These packages include \`bitcoind\`, \`bitcoin-cli\`, \`bitcoin-tx\`, \`bitcoin-util\`, \`bitcoin-wallet\`, and \`bitcoin-qt\`."
+            echo
+            echo "### Downloads"
+            echo
+            echo "| Platform | File |"
+            echo "|----------|------|"
+            echo "| Linux x86_64 | \`BitcoinPoW-${TAG}-x86_64-linux-gnu.tar.gz\` |"
+            echo "| Windows x64 | \`BitcoinPoW-${TAG}-win64.zip\` |"
+            echo "| macOS Apple Silicon | \`BitcoinPoW-${TAG}-arm64-apple-darwin.zip\` |"
+            echo
+            echo "### Verify downloads"
+            echo "Check \`SHA256SUMS\` against the file you downloaded."
+            echo
+            echo "GPU mining still uses the Linux shared-memory worker. The Windows package is the node and Qt wallet only."
+            echo
+            echo "Default branch remains \`26.6.1_unified\`. This release is from \`btcw_31.x\`."
+          } > /tmp/notes.md
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Bitcoin PoW ${TAG}" \
+            --target "${GITHUB_SHA}" \
+            --notes-file /tmp/notes.md \
+            "dist/BitcoinPoW-${TAG}-x86_64-linux-gnu.tar.gz" \
+            "dist/BitcoinPoW-${TAG}-win64.zip" \
+            "dist/BitcoinPoW-${TAG}-arm64-apple-darwin.zip" \
+            dist/SHA256SUMS

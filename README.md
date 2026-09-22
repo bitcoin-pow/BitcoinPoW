@@ -159,10 +159,10 @@ Mainnet is the supported public network in this codebase. Regtest is available f
 
 ## Project resources
 
-- [Source code](https://github.com/bitcoin-pow/BitcoinPoW)
+- [Source code](https://github.com/btcw-space/BitcoinPoW)
 - [Release notes](doc/release-notes.md)
-- [Issue tracker](https://github.com/bitcoin-pow/BitcoinPoW/issues)
-- [Project website](https://btcw.space)
+- [Issue tracker](https://github.com/btcw-space/BitcoinPoW/issues)
+- [Project website](https://btcw.space/)
 - [Telegram](https://t.me/BitcoinPoWPoT)
 
 ## Safety and development status

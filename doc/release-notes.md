@@ -8,11 +8,11 @@ Bitcoin data directory or Bitcoin chain data.
 
 Report problems at:
 
-  <https://github.com/bitcoin-pow/BitcoinPoW/issues>
+  <https://github.com/btcw-space/BitcoinPoW/issues>
 
 Downloads and project information are available at:
 
-  <https://btcw.space>
+  <https://btcw.space/>
 
 Important consensus change
 ==========================

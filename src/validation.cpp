@@ -4107,7 +4107,22 @@ static bool CheckForkBlockSignature(const CBlock& block)
 
 static bool CheckBlockSignatureForHeight(const CBlock& block, int height)
 {
-    return height < NO_EXT_WORK_ACTIVATION_HEIGHT ? CheckLegacyBlockSignature(block) : CheckForkBlockSignature(block);
+    const bool fork_rules = height >= NO_EXT_WORK_ACTIVATION_HEIGHT;
+    const bool valid = fork_rules ? CheckForkBlockSignature(block) : CheckLegacyBlockSignature(block);
+    if (!valid) {
+        CPubKey pubkey;
+        arith_uint256 target;
+        const bool context_ok = GetBlockSignatureContext(block, pubkey, target);
+        LogError("Block signature rejected: block=%s height=%d activation_height=%d rules=%s bits=%08x signature_size=%u legacy_valid=%s fork_valid=%s pubkey_context=%s fork_ecdsa_valid=%s fork_work_valid=%s",
+                 block.GetHash().ToString(), height, NO_EXT_WORK_ACTIVATION_HEIGHT,
+                 fork_rules ? "fork" : "legacy", block.nBits, block.vchBlockSig.size(),
+                 (!fork_rules ? valid : CheckLegacyBlockSignature(block)) ? "true" : "false",
+                 (fork_rules ? valid : CheckForkBlockSignature(block)) ? "true" : "false",
+                 context_ok ? "true" : "false",
+                 (context_ok && pubkey.Verify(block.GetHashWithoutSign(), block.vchBlockSig)) ? "true" : "false",
+                 (context_ok && UintToArith256(Hash(block.vchBlockSig)) <= target) ? "true" : "false");
+    }
+    return valid;
 }
 
 static bool CheckBlockSignatureAnyFormat(const CBlock& block)

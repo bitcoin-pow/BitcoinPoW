@@ -128,7 +128,6 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].period = 2016;
 
         consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000255dedbab9b892fd5a4c"};
-        consensus.defaultAssumeValid = consensus.posLimit;
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -179,6 +178,8 @@ public:
 
         consensus.historical_checkpoint = Consensus::HistoricalCheckpoint{
             141410, consteval_ctor(uint256{"05d553c0600bdeff22592f1331c8bc9fd534c35cd75a892c32055dea914cd00e"})};
+        // Reuse the historical anchor for the optional script-check optimization.
+        consensus.defaultAssumeValid = consensus.historical_checkpoint->hash;
         consensus.historical_checkpoints = {
             {0, consensus.hashGenesisBlock},
             {10, uint256{"000000000000a6616dfa3698c990302319934e577f3979f91f3d09a0c4de7bb8"}},

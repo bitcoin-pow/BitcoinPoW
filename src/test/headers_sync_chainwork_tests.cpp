@@ -141,6 +141,68 @@ std::vector<CBlockHeader> HeadersGeneratorSetup::GenerateHeaders(
 //    when the chain a peer provides has too little work.
 BOOST_FIXTURE_TEST_SUITE(headers_sync_chainwork_tests, HeadersGeneratorSetup)
 
+BOOST_AUTO_TEST_CASE(stake_header_redownload)
+{
+    CBlockHeader start = genesis;
+    start.nBits = 0x207fffff;
+    const uint256 start_hash = start.GetHash();
+    CBlockIndex anchor(start);
+    anchor.phashBlock = &start_hash;
+    anchor.nChainWork = GetBlockProof(start);
+    std::vector<CBlockHeader> headers;
+    const uint32_t markers[]{0xFEEDBEEF, 0xFEEDBEE1, 0xFEEDBEE2};
+    for (uint32_t i = 0; i < 6; ++i) {
+        CBlockHeader header = start;
+        header.hashPrevBlock = headers.empty() ? start_hash : headers.back().GetHash();
+        header.nTime += i + 1;
+        header.nNonce = markers[i % 3];
+        header.prevoutStake = COutPoint{Txid::FromUint256(uint256::ONE), i};
+        header.vchBlockSig.assign(70 + i, static_cast<unsigned char>(i + 1));
+        const auto restored = CompressedHeader(header).GetFullHeader(header.hashPrevBlock);
+        BOOST_CHECK(restored.GetHash() == header.GetHash());
+        BOOST_CHECK(restored.prevoutStake == header.prevoutStake);
+        BOOST_CHECK(restored.vchBlockSig == header.vchBlockSig);
+        headers.push_back(header);
+    }
+
+    // Header sync preserves bytes; cryptographic stake validation happens
+    // with the block body. Exercise both buffer draining and batch boundaries.
+    HeadersSyncState sync{0, Params().GetConsensus(),
+                         HeadersSyncParams{.commitment_period = 1, .redownload_buffer_size = 2},
+                         anchor, anchor.nChainWork + GetBlockProof(headers[0]) * 6};
+    BOOST_REQUIRE(sync.ProcessNextHeaders(headers, true).success);
+    BOOST_REQUIRE(sync.GetState() == State::REDOWNLOAD);
+    auto first = sync.ProcessNextHeaders(std::span{headers}.first(4), true);
+    BOOST_REQUIRE(first.success);
+    BOOST_REQUIRE_EQUAL(first.pow_validated_headers.size(), 2U);
+    auto last = sync.ProcessNextHeaders(std::span{headers}.subspan(4), false);
+    BOOST_REQUIRE(last.success);
+    BOOST_REQUIRE(sync.GetState() == State::FINAL);
+    auto restored = first.pow_validated_headers;
+    restored.insert(restored.end(), last.pow_validated_headers.begin(), last.pow_validated_headers.end());
+    BOOST_REQUIRE_EQUAL(restored.size(), headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BOOST_CHECK(restored[i].GetHash() == headers[i].GetHash());
+        BOOST_CHECK(restored[i].hashPrevBlock == headers[i].hashPrevBlock);
+    }
+
+    // A peer cannot grow the variable-length signature buffer without bound.
+    for (size_t i = 0; i < headers.size(); ++i) {
+        headers[i].vchBlockSig.assign(3 * 1024 * 1024, 1);
+        headers[i].hashPrevBlock = i == 0 ? start_hash : headers[i - 1].GetHash();
+    }
+    HeadersSyncState bounded{0, Params().GetConsensus(),
+                            HeadersSyncParams{.commitment_period = 1, .redownload_buffer_size = 6},
+                            anchor, anchor.nChainWork + GetBlockProof(headers[0]) * 6};
+    BOOST_REQUIRE(bounded.ProcessNextHeaders(headers, true).success);
+    BOOST_REQUIRE(bounded.GetState() == State::REDOWNLOAD);
+    BOOST_REQUIRE(bounded.ProcessNextHeaders(std::span{headers}.first(5), true).success);
+    const auto excess = bounded.ProcessNextHeaders(std::span{headers}.subspan(5), false);
+    BOOST_CHECK(!excess.success);
+    BOOST_CHECK(excess.pow_validated_headers.empty());
+    BOOST_CHECK(bounded.GetState() == State::FINAL);
+}
+
 BOOST_AUTO_TEST_CASE(sneaky_redownload)
 {
     const auto& first_chain{FirstChain()};

@@ -10,9 +10,9 @@
 #include <util/time.h>
 #include <util/vector.h>
 
-// Our memory analysis in headerssync-params.py assumes this many bytes for a
-// CompressedHeader (we should re-calculate parameters if we compress further).
-static_assert(sizeof(CompressedHeader) == 48);
+// BTCW stake headers also retain their outpoint and variable-length signature.
+// The Bitcoin-only 48-byte memory estimate in headerssync-params.py does not
+// describe this buffer; omitting those fields changes the reconstructed hash.
 
 HeadersSyncState::HeadersSyncState(NodeId id,
                                    const Consensus::Params& consensus_params,
@@ -54,6 +54,7 @@ void HeadersSyncState::Finalize()
     ClearShrink(m_header_commitments);
     m_last_header_received.SetNull();
     ClearShrink(m_redownloaded_headers);
+    m_redownload_signature_bytes = 0;
     m_redownload_buffer_last_hash.SetNull();
     m_redownload_buffer_first_prev_hash.SetNull();
     m_process_all_remaining_headers = false;
@@ -219,6 +220,11 @@ bool HeadersSyncState::ValidateAndStoreRedownloadedHeader(const CBlockHeader& he
 
     int64_t next_height = m_redownload_buffer_last_height + 1;
 
+    if (header.vchBlockSig.size() > MAX_BUFFERED_SIGNATURE_BYTES - m_redownload_signature_bytes) {
+        LogDebug(BCLog::NET, "Initial headers sync aborted with peer=%d: signature buffer limit at height=%i (redownload phase)\n", m_id, next_height);
+        return false;
+    }
+
     // Ensure that we're working on a header that connects to the chain we're
     // downloading.
     if (header.hashPrevBlock != m_redownload_buffer_last_hash) {
@@ -271,6 +277,7 @@ bool HeadersSyncState::ValidateAndStoreRedownloadedHeader(const CBlockHeader& he
 
     // Store this header for later processing.
     m_redownloaded_headers.emplace_back(header);
+    m_redownload_signature_bytes += header.vchBlockSig.size();
     m_redownload_buffer_last_height = next_height;
     m_redownload_buffer_last_hash = header.GetHash();
 
@@ -287,6 +294,7 @@ std::vector<CBlockHeader> HeadersSyncState::PopHeadersReadyForAcceptance()
     while (m_redownloaded_headers.size() > m_params.redownload_buffer_size ||
             (m_redownloaded_headers.size() > 0 && m_process_all_remaining_headers)) {
         ret.emplace_back(m_redownloaded_headers.front().GetFullHeader(m_redownload_buffer_first_prev_hash));
+        m_redownload_signature_bytes -= m_redownloaded_headers.front().vchBlockSig.size();
         m_redownloaded_headers.pop_front();
         m_redownload_buffer_first_prev_hash = ret.back().GetHash();
     }

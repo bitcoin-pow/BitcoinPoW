@@ -25,6 +25,8 @@ struct CompressedHeader {
     uint32_t nTime{0};
     uint32_t nBits{0};
     uint32_t nNonce{0};
+    COutPoint prevoutStake{};
+    std::vector<unsigned char> vchBlockSig{};
 
     CompressedHeader()
     {
@@ -36,7 +38,9 @@ struct CompressedHeader {
           hashMerkleRoot{header.hashMerkleRoot},
           nTime{header.nTime},
           nBits{header.nBits},
-          nNonce{header.nNonce}
+          nNonce{header.nNonce},
+          prevoutStake{header.prevoutStake},
+          vchBlockSig{header.vchBlockSig}
     {
     }
 
@@ -49,6 +53,8 @@ struct CompressedHeader {
         ret.nTime = nTime;
         ret.nBits = nBits;
         ret.nNonce = nNonce;
+        ret.prevoutStake = prevoutStake;
+        ret.vchBlockSig = vchBlockSig;
         return ret;
     };
 };
@@ -251,6 +257,9 @@ private:
      *  until enough commitments have been verified; those are stored in
      *  m_redownloaded_headers */
     std::deque<CompressedHeader> m_redownloaded_headers;
+    /** Bound the variable-sized signatures retained from an untrusted peer. */
+    static constexpr size_t MAX_BUFFERED_SIGNATURE_BYTES{16 * 1024 * 1024};
+    size_t m_redownload_signature_bytes{0};
 
     /** Height of last header in m_redownloaded_headers */
     int64_t m_redownload_buffer_last_height{0};

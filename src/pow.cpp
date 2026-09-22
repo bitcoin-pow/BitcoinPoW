@@ -319,13 +319,17 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
                 reference_target *= ASERT_ACTIVATION_TARGET_MULTIPLIER;
             }
         }
-        // Start the new schedule at the anchor itself. The activation target
+        // Start the new schedule at the anchor's median time past. The activation target
         // is exactly the eased reference (subject to compact rounding/capping),
         // regardless of how long the final pre-fork block took to mine.
         // After the transition blocks, use the achieved target at the new anchor
         // without a multiplier. The handoff preserves that target exactly.
+        // Use MTP at BOTH endpoints: an isolated late anchor followed by a
+        // backdated block must not turn an outage into a difficulty spike.
+        // Valid descendants have nondecreasing MTP, bounding hardening to
+        // one target spacing per block, even after long timestamp gaps.
         return CalculateASERTTarget(reference_target, params.nPowTargetSpacing,
-            pindexLast->GetBlockTime() - anchor->GetBlockTime() + params.nPowTargetSpacing,
+            pindexLast->GetMedianTimePast() - anchor->GetMedianTimePast() + params.nPowTargetSpacing,
             pindexLast->nHeight - anchor->nHeight, pow_limit, ASERT_HALF_LIFE).GetCompact();
     }
 

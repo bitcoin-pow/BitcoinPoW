@@ -245,10 +245,11 @@ BOOST_AUTO_TEST_CASE(asert_activation_and_branches)
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[45], &candidate, params), 0x1b00ffffU);
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c271000U);
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c271000U);
+    // A single outlier does not move the median or change difficulty.
     blocks[47].nTime += ASERT_HALF_LIFE;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c271000U);
     candidate.nTime = std::numeric_limits<uint32_t>::max();
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c271000U);
     CBlockIndex alternative_anchor;
     alternative_anchor.nHeight = blocks[46].nHeight;
     alternative_anchor.nTime = blocks[46].nTime;
@@ -258,8 +259,8 @@ BOOST_AUTO_TEST_CASE(asert_activation_and_branches)
     alternative_tip.nHeight = blocks[47].nHeight;
     alternative_tip.nTime = blocks[47].nTime;
     alternative_tip.pprev = &alternative_anchor;
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&alternative_tip, &candidate, params), 0x1d009c40U);
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c4e2000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&alternative_tip, &candidate, params), 0x1c4e2000U);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[47], &candidate, params), 0x1c271000U);
     // The reset must not inherit the solve time of the last legacy block.
     blocks[45].nTime -= ASERT_HALF_LIFE;
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[46], &candidate, params), 0x1c271000U);
@@ -310,9 +311,136 @@ BOOST_AUTO_TEST_CASE(asert_transition_reference_expires)
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&alternative, &candidate, params), alternative.nBits);
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[anchor], &candidate, params), blocks[anchor].nBits);
     blocks[anchor + 1].nTime = blocks[anchor].nTime + 600 + ASERT_HALF_LIFE;
-    arith_uint256 achieved;
-    achieved.SetCompact(blocks[anchor].nBits);
-    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[anchor + 1], &candidate, params), arith_uint256(achieved * 2).GetCompact());
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[anchor + 1], &candidate, params), settled);
+}
+
+// Isolated anchor outliers must not survive the handoff as a harder target.
+BOOST_AUTO_TEST_CASE(asert_handoff_future_timestamp_effect)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    CBlockHeader candidate;
+    const int anchor = 11 + ASERT_TRANSITION_BLOCKS;
+    std::vector<CBlockIndex> blocks(anchor + 2);
+    for (int i = 0; i <= anchor + 1; ++i) {
+        blocks[i].nHeight = NO_EXT_WORK_ACTIVATION_HEIGHT - 12 + i;
+        blocks[i].nTime = 1700000000 + 600 * i;
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nBits = i < 12 ? 0x17217b66 : GetNextWorkRequired(&blocks[i - 1], &candidate, params);
+    }
+    arith_uint256 baseline;
+    baseline.SetCompact(GetNextWorkRequired(&blocks.back(), &candidate, params));
+    const auto handoff_bits = blocks.back().nBits;
+    blocks[anchor].nTime += MAX_FUTURE_BLOCK_TIME;
+    BOOST_CHECK(blocks[anchor].GetBlockTime() > blocks[anchor - 1].GetMedianTimePast());
+    BOOST_CHECK(blocks.back().GetBlockTime() > blocks[anchor].GetMedianTimePast());
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[anchor], &candidate, params), handoff_bits);
+    arith_uint256 manipulated;
+    manipulated.SetCompact(GetNextWorkRequired(&blocks.back(), &candidate, params));
+    const double ratio = baseline.getdouble() / manipulated.getdouble();
+    BOOST_CHECK_EQUAL(ratio, 1.0);
+    BOOST_TEST_MESSAGE("Handoff future timestamp: difficulty multiplier=" << ratio);
+
+    // A real outage can leave the new anchor much farther ahead of MTP than
+    // the future-time allowance. The following block may then be backdated.
+    blocks[anchor].nTime += 48 * 60 * 60 - MAX_FUTURE_BLOCK_TIME;
+    BOOST_CHECK(blocks.back().GetBlockTime() > blocks[anchor].GetMedianTimePast());
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[anchor], &candidate, params), handoff_bits);
+    const auto stalled_bits = GetNextWorkRequired(&blocks.back(), &candidate, params);
+    manipulated.SetCompact(stalled_bits);
+    const double outage_ratio = baseline.getdouble() / manipulated.getdouble();
+    BOOST_CHECK_EQUAL(outage_ratio, 1.0);
+    candidate.nTime = blocks[anchor].nTime + 7 * 24 * 60 * 60;
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &candidate, params), stalled_bits);
+    BOOST_TEST_MESSAGE("48-hour handoff gap followed by backdating: difficulty multiplier=" << outage_ratio);
+}
+
+BOOST_AUTO_TEST_CASE(asert_activation_after_timestamp_gap)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    CBlockHeader candidate;
+    std::vector<CBlockIndex> blocks(13);
+    for (int i = 0; i < 13; ++i) {
+        blocks[i].nHeight = NO_EXT_WORK_ACTIVATION_HEIGHT - 12 + i;
+        blocks[i].nTime = 1700000000 + 600 * i;
+        blocks[i].nBits = 0x17217b66;
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+    }
+    // The last legacy block arrives after a 48-hour outage. A first fork
+    // block can still use an old timestamp above MTP, with an old stake input.
+    blocks[11].nTime += 48 * 60 * 60;
+    blocks[12].nBits = GetNextWorkRequired(&blocks[11], &candidate, params);
+    BOOST_CHECK(blocks[12].GetBlockTime() > blocks[11].GetMedianTimePast());
+    BOOST_CHECK(blocks[12].GetBlockTime() < blocks[11].GetBlockTime());
+    arith_uint256 initial, next;
+    initial.SetCompact(blocks[12].nBits);
+    const auto next_bits = GetNextWorkRequired(&blocks[12], &candidate, params);
+    next.SetCompact(next_bits);
+    const double ratio = initial.getdouble() / next.getdouble();
+    BOOST_CHECK_EQUAL(ratio, 1.0);
+    // Candidate timestamps still cannot influence their own required target.
+    candidate.nTime = blocks[11].nTime + 7 * 24 * 60 * 60;
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks[12], &candidate, params), next_bits);
+    BOOST_TEST_MESSAGE("48-hour activation gap: difficulty multiplier=" << ratio
+                       << "; advancing candidate time by seven days leaves bits unchanged");
+}
+
+BOOST_AUTO_TEST_CASE(asert_median_time_response)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    CBlockHeader candidate;
+    std::vector<CBlockIndex> blocks(12 + ASERT_TRANSITION_BLOCKS + 12);
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        blocks[i].nHeight = NO_EXT_WORK_ACTIVATION_HEIGHT - 12 + i;
+        blocks[i].nTime = 1700000000 + 600 * i;
+        blocks[i].pprev = i ? &blocks[i - 1] : nullptr;
+        blocks[i].nBits = i < 12 ? 0x17217b66 : GetNextWorkRequired(&blocks[i - 1], &candidate, params);
+    }
+    // Full median windows on both sides preserve the steady ten-minute schedule.
+    for (size_t i = 12; i < blocks.size(); ++i) {
+        BOOST_CHECK_EQUAL(blocks[i].nBits, blocks[12].nBits);
+    }
+    arith_uint256 reference;
+    reference.SetCompact(blocks.back().nBits);
+    // Once six blocks carry the delay, the median reflects one half-life of
+    // extra elapsed time and the target doubles, retaining normal recovery.
+    for (size_t i = blocks.size() - 6; i < blocks.size(); ++i) {
+        blocks[i].nTime += ASERT_HALF_LIFE;
+    }
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &candidate, params),
+                      arith_uint256(reference * 2).GetCompact());
+}
+
+BOOST_AUTO_TEST_CASE(asert_backdating_hardening_bound)
+{
+    const auto params = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();
+    CBlockHeader candidate;
+    // Exercise activation, handoff, and the settled schedule with long outages
+    // followed by the oldest timestamps that contextual validation permits.
+    for (int gap_at : {11, 11 + ASERT_TRANSITION_BLOCKS, 20 + ASERT_TRANSITION_BLOCKS}) {
+        std::vector<CBlockIndex> blocks(60 + ASERT_TRANSITION_BLOCKS);
+        arith_uint256 previous;
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            auto& block = blocks[i];
+            block.nHeight = NO_EXT_WORK_ACTIVATION_HEIGHT - 12 + i;
+            block.pprev = i ? &blocks[i - 1] : nullptr;
+            block.nTime = 1700000000 + 600 * i;
+            if (int(i) == gap_at) block.nTime += 48 * 60 * 60;
+            if (int(i) > gap_at) block.nTime = block.pprev->GetMedianTimePast() + 1;
+            if (block.pprev) {
+                BOOST_REQUIRE(block.GetBlockTime() > block.pprev->GetMedianTimePast());
+                BOOST_REQUIRE(block.GetMedianTimePast() >= block.pprev->GetMedianTimePast());
+            }
+            block.nBits = i < 12 ? 0x17217b66 : GetNextWorkRequired(block.pprev, &candidate, params);
+            arith_uint256 target;
+            target.SetCompact(block.nBits);
+            if (i > 12) {
+                // Polynomial and compact rounding allow a small tolerance.
+                BOOST_CHECK_LE(previous.getdouble() / target.getdouble(),
+                               std::exp2(600.0 / ASERT_HALF_LIFE) * 1.0005);
+            }
+            previous = target;
+        }
+    }
 }
 
 // Deterministic expected solve times model hash-rate steps without mining.

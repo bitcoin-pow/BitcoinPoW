@@ -27,6 +27,13 @@ From that height, nodes enforce:
 - ASERT difficulty adjustment using BTCW's activation anchor.
 - Positive coinstake outputs must pay the same public key that signs the block.
 
+ASERT measures elapsed time using the 11-block median time past at both the
+reference block and the current tip. This prevents an isolated late timestamp
+followed by backdating from sharply increasing difficulty at activation or the
+transition handoff. The initial target increase remains 10,000 times (capped at
+the network limit), with an 18-block transition and a three-hour half-life.
+Median time introduces a delay in the response to changes in block timing.
+
 Every miner and validating node must upgrade before activation. Nodes running
 incompatible consensus code may follow or produce an invalid chain after the
 activation height.

@@ -2629,12 +2629,14 @@ bool PeerManagerImpl::CheckHeadersPoW(const std::vector<CBlockHeader>& headers, 
 {
     // Do these headers have proof-of-work matching what's claimed?
     if (!HasValidProofOfWork(headers, m_chainparams.GetConsensus())) {
+        LogWarning("Rejecting headers from peer=%d: invalid proof of work", peer.m_id);
         Misbehaving(peer, "header with invalid proof of work");
         return false;
     }
 
     // Are these headers connected to each other?
     if (!CheckHeadersAreContinuous(headers)) {
+        LogWarning("Rejecting headers from peer=%d: non-continuous headers sequence", peer.m_id);
         Misbehaving(peer, "non-continuous headers sequence");
         return false;
     }
@@ -3094,6 +3096,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                                            state, &pindexLast)};
     if (!processed) {
         if (state.IsInvalid()) {
+            LogWarning("Rejecting headers from peer=%d: %s", pfrom.GetId(), state.ToString());
             if (!pfrom.IsInboundConn() && state.GetResult() == BlockValidationResult::BLOCK_CACHED_INVALID) {
                 // Warn user if outgoing peers send us headers of blocks that we previously marked as invalid.
                 LogWarning("%s (received from peer=%i). "

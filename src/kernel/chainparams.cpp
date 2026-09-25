@@ -161,6 +161,14 @@ public:
         vSeeds.emplace_back("seed6.bitcoin-pow.org");
         vSeeds.emplace_back("seed7.bitcoin-pow.org");
         vSeeds.emplace_back("seed8.bitcoin-pow.org");
+        vSeeds.emplace_back("seed1.btcw.space");
+        vSeeds.emplace_back("seed2.btcw.space");
+        vSeeds.emplace_back("seed3.btcw.space");
+        vSeeds.emplace_back("seed4.btcw.space");
+        vSeeds.emplace_back("seed5.btcw.space");
+        vSeeds.emplace_back("seed6.btcw.space");
+        vSeeds.emplace_back("seed7.btcw.space");
+        vSeeds.emplace_back("seed8.btcw.space");
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,0);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,5);

@@ -81,6 +81,7 @@
 #include <net.h>
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <condition_variable>
 #include <exception>
 #include <numeric>
@@ -90,7 +91,9 @@
 #include <tuple>
 #include <variant>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -4706,10 +4709,10 @@ bool CWallet::CreateCoinStake(ChainstateManager& chainman, const CWallet&, unsig
 bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) const
 {
 #ifdef _WIN32
-    LogError("GPU shared-memory mining is not yet available on Windows");
-    return false;
+    static constexpr char SHM_NAME[]{"shared_mem"};
 #else
     static constexpr char SHM_NAME[]{"/shared_mem"};
+#endif
     static constexpr uint64_t SENTINEL_NONCE{0x0707070707070707ULL};
     static constexpr size_t KEY_BYTES{32};
     static constexpr size_t CONTEXT_BYTES{160};
@@ -4726,6 +4729,20 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
     block.vchBlockSig.clear();
     const uint256 hash{block.GetHashWithoutSign()};
 
+#ifdef _WIN32
+    HANDLE mapping{CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                      static_cast<DWORD>(sizeof(SharedData)), SHM_NAME)};
+    if (!mapping) {
+        WalletLogPrintf("GPU shared memory CreateFileMapping failed (%lu)\n", GetLastError());
+        return false;
+    }
+    auto* shared{static_cast<SharedData*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedData)))};
+    if (!shared) {
+        WalletLogPrintf("GPU shared memory MapViewOfFile failed (%lu)\n", GetLastError());
+        CloseHandle(mapping);
+        return false;
+    }
+#else
     const int fd{shm_open(SHM_NAME, O_CREAT | O_RDWR, 0600)};
     if (fd < 0 || ftruncate(fd, sizeof(SharedData)) != 0) {
         if (fd >= 0) close(fd);
@@ -4734,6 +4751,7 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
     auto* shared{static_cast<SharedData*>(mmap(nullptr, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0))};
     close(fd);
     if (shared == MAP_FAILED) return false;
+#endif
 
     std::array<uint8_t, KEY_BYTES + CONTEXT_BYTES + HASH_BYTES> work{};
     key.Get_secp256k1_get_secret_key(work.data());
@@ -4777,9 +4795,13 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
         }
     }
     std::memset(const_cast<uint8_t*>(shared->data), 0, sizeof(shared->data));
+#ifdef _WIN32
+    UnmapViewOfFile(shared);
+    CloseHandle(mapping);
+#else
     munmap(shared, sizeof(SharedData));
-    return found;
 #endif
+    return found;
 }
 
 std::optional<uint256> CWallet::MineStakeBlock(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds)

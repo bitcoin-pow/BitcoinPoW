@@ -4007,6 +4007,10 @@ bool CheckHeaderPoW(const CBlockHeader& block, const Consensus::Params& consensu
 
 bool CheckHeaderPoS(const CBlockHeader& block, CBlockIndex* pindex, CCoinsViewCache& view)
 {
+    if (pindex->nHeight >= NO_EXT_WORK_ACTIVATION_HEIGHT) {
+        // Fork blocks prove work with Hash(DER) in CheckForkBlockSignature.
+        return true;
+    }
     if (pindex->pprev->nHeight > 10 && !CheckRecoveredPubKeyFromBlockSignature(pindex->pprev, block, view)) return false;
     return CheckKernel(pindex->pprev, block.nBits, block.StakeTime(), block.nNonce, block.prevoutStake, view);
 }

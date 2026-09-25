@@ -90,7 +90,9 @@
 #include <tuple>
 #include <variant>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -4650,7 +4652,10 @@ bool CWallet::CreateCoinStake(ChainstateManager& chainman, const CWallet&, unsig
         const auto& [wtx, n] = *current;
         const CTxOut& prevout{wtx->tx->vout.at(n)};
         const COutPoint kernel{wtx->GetHash(), n};
-        if (!CheckKernel(tip, nBits, block_time, nonce, kernel, chainman.ActiveChainstate().CoinsTip())) continue;
+        if (tip->nHeight + 1 < NO_EXT_WORK_ACTIVATION_HEIGHT &&
+            !CheckKernel(tip, nBits, block_time, nonce, kernel, chainman.ActiveChainstate().CoinsTip())) {
+            continue;
+        }
 
         std::vector<std::vector<unsigned char>> solutions;
         const TxoutType type{Solver(prevout.scriptPubKey, solutions)};
@@ -4706,17 +4711,20 @@ bool CWallet::CreateCoinStake(ChainstateManager& chainman, const CWallet&, unsig
 bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) const
 {
 #ifdef _WIN32
-    LogError("GPU shared-memory mining is not yet available on Windows");
-    return false;
+    static constexpr char SHM_NAME[]{"shared_mem"};
 #else
     static constexpr char SHM_NAME[]{"/shared_mem"};
+#endif
     static constexpr uint64_t SENTINEL_NONCE{0x0707070707070707ULL};
     static constexpr size_t KEY_BYTES{32};
     static constexpr size_t CONTEXT_BYTES{160};
     static constexpr size_t HASH_BYTES{32};
     struct SharedData {
         volatile uint64_t nonce;
+        volatile uint32_t der_len;
+        volatile uint8_t der[72];
         volatile uint8_t data[KEY_BYTES + CONTEXT_BYTES + HASH_BYTES];
+        volatile uint8_t target[32];
     };
 
     arith_uint256 target;
@@ -4726,6 +4734,20 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
     block.vchBlockSig.clear();
     const uint256 hash{block.GetHashWithoutSign()};
 
+#ifdef _WIN32
+    HANDLE mapping{CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                      static_cast<DWORD>(sizeof(SharedData)), SHM_NAME)};
+    if (!mapping) {
+        WalletLogPrintf("GPU shared memory CreateFileMapping failed (%lu)\n", GetLastError());
+        return false;
+    }
+    auto* shared{static_cast<SharedData*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedData)))};
+    if (!shared) {
+        WalletLogPrintf("GPU shared memory MapViewOfFile failed (%lu)\n", GetLastError());
+        CloseHandle(mapping);
+        return false;
+    }
+#else
     const int fd{shm_open(SHM_NAME, O_CREAT | O_RDWR, 0600)};
     if (fd < 0 || ftruncate(fd, sizeof(SharedData)) != 0) {
         if (fd >= 0) close(fd);
@@ -4734,14 +4756,20 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
     auto* shared{static_cast<SharedData*>(mmap(nullptr, sizeof(SharedData), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0))};
     close(fd);
     if (shared == MAP_FAILED) return false;
+#endif
 
     std::array<uint8_t, KEY_BYTES + CONTEXT_BYTES + HASH_BYTES> work{};
     key.Get_secp256k1_get_secret_key(work.data());
     key.Get_secp256k1_ecmult_gen_context(work.data() + KEY_BYTES);
     std::memcpy(work.data() + KEY_BYTES + CONTEXT_BYTES, hash.data(), HASH_BYTES);
     shared->nonce = SENTINEL_NONCE;
+    shared->der_len = 0;
     std::memcpy(const_cast<uint8_t*>(shared->data), work.data(), work.size());
+    const uint256 target_bytes{ArithToUint256(target)};
+    std::memcpy(const_cast<uint8_t*>(shared->target), target_bytes.data(), 32);
+    WalletLogPrintf("GPU work posted hash=%s target=%s\n", hash.ToString(), target_bytes.ToString());
 
+    const CPubKey pub{key.GetPubKey()};
     uint64_t previous{SENTINEL_NONCE};
     bool found{false};
     bool abort{false};
@@ -4758,17 +4786,26 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
             }
             previous = nonce;
             std::vector<unsigned char> signature;
-            if (!key.Sign(hash, signature, /*grind=*/false, nonce)) {
-                WalletLogPrintf("GPU result nonce=%016x signing_failed=true found=false\n", nonce);
-                abort = true;
-                break;
+            const uint32_t der_len{shared->der_len};
+            if (der_len == 70 || der_len == 71) {
+                signature.assign(const_cast<uint8_t*>(shared->der), const_cast<uint8_t*>(shared->der) + der_len);
+            }
+            const bool verified{!signature.empty() && pub.Verify(hash, signature)};
+            if (!verified) {
+                signature.clear();
+                if (!key.Sign(hash, signature, /*grind=*/false, nonce)) {
+                    WalletLogPrintf("GPU result nonce=%016x signing_failed=true found=false\n", nonce);
+                    abort = true;
+                    break;
+                }
             }
             const uint256 proof_hash{Hash(signature)};
             const bool meets_target{(signature.size() == 70 || signature.size() == 71) &&
                                     UintToArith256(proof_hash) <= target};
-            WalletLogPrintf("GPU result nonce=%016x pow_hash=%s target=%s signature_size=%u found=%s\n",
-                            nonce, proof_hash.ToString(), ArithToUint256(target).ToString(),
-                            signature.size(), meets_target ? "true" : "false");
+            WalletLogPrintf("GPU result nonce=%016x verify=%s pow_hash=%s target=%s signature_size=%u found=%s\n",
+                            nonce, verified ? "gpu" : "resign", proof_hash.ToString(),
+                            ArithToUint256(target).ToString(), signature.size(),
+                            meets_target ? "true" : "false");
             if (meets_target) {
                 block.vchBlockSig = std::move(signature);
                 found = true;
@@ -4777,9 +4814,13 @@ bool CWallet::SignStakeBlock(CBlock& block, CKey& key, uint64_t max_seconds) con
         }
     }
     std::memset(const_cast<uint8_t*>(shared->data), 0, sizeof(shared->data));
+#ifdef _WIN32
+    UnmapViewOfFile(shared);
+    CloseHandle(mapping);
+#else
     munmap(shared, sizeof(SharedData));
-    return found;
 #endif
+    return found;
 }
 
 std::optional<uint256> CWallet::MineStakeBlock(ChainstateManager& chainman, const CTxMemPool& mempool, uint64_t max_seconds)
@@ -4830,6 +4871,7 @@ std::optional<uint256> CWallet::MineStakeBlock(ChainstateManager& chainman, cons
     // Locally mined blocks do not need the peer header anti-DoS work check,
     // just like generateblock and submitblock. Full block validation still runs.
     if (!chainman.ProcessNewBlock(mined, /*force_processing=*/true, /*min_pow_checked=*/true, &is_new) || !is_new) return std::nullopt;
+    chainman.ActiveChainstate().ForceFlushStateToDisk(/*wipe_cache=*/false);
     return mined->GetHash();
 }
 

@@ -206,13 +206,13 @@ bool SigHasLowR(const secp256k1_ecdsa_signature* sig)
     return compact_sig[0] < 0x80;
 }
 
-bool CKey::Sign(const uint256 &hash, std::vector<unsigned char>& vchSig, bool grind, uint32_t test_case) const {
+bool CKey::Sign(const uint256 &hash, std::vector<unsigned char>& vchSig, bool grind, uint64_t test_case) const {
     if (!keydata)
         return false;
     vchSig.resize(CPubKey::SIGNATURE_SIZE);
     size_t nSigLen = CPubKey::SIGNATURE_SIZE;
     unsigned char extra_entropy[32] = {0};
-    WriteLE32(extra_entropy, test_case);
+    WriteLE64(extra_entropy, test_case);
     secp256k1_ecdsa_signature sig;
     uint32_t counter = 0;
     int ret = secp256k1_ecdsa_sign(secp256k1_context_sign, &sig, hash.begin(), UCharCast(begin()), secp256k1_nonce_function_rfc6979, (!grind && test_case) ? extra_entropy : nullptr);
